@@ -1,0 +1,14 @@
+device_name = "M2"
+# Typing is also allowed when the screen is locked or noctalia's polkit panel is open.
+allowed_app_ids = ["foot", "footclient", "spterminal"]
+player = "Feishin"
+job_unit = "autobuild-everything.service"
+
+[ha]
+url = "https://homeassistant.example.ts.net"
+notify_service = "mobile_app_phone"
+# Secrets live in the keyring:
+#   secret-tool store --label="ha-remote token" service ha-remote key token
+#   secret-tool store --label="ha-remote unlock" service ha-remote key unlock
+# Used by ha-setup only
+person = "person.me"
