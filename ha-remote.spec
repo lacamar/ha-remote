@@ -1,4 +1,4 @@
-%global tag 0.1.1
+%global tag 0.1.2
 
 Name:     ha-remote
 Version:  %{tag}
@@ -61,6 +61,9 @@ cp -r protocols %{buildroot}%{_datadir}/%{name}/
 %{_datadir}/%{name}
 
 %changelog
+* Tue Sep 22 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.2-1
+- Tidier notification text
+
 * Tue Sep 22 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.1-1
 - Ignore lingering polkit panel after typing
 

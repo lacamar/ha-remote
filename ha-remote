@@ -661,10 +661,10 @@ class Remote:
         self.last_ask = time.monotonic()
         log.info("asking approval for %s: %s", kind, what)
         await self.post_state(f"sensor.{self.prefix}_request", f"{kind}: {what}"[:255], friendly_name=f"{self.name} request",
-                              icon="mdi:shield-key", kind=kind, code=nonce[:4])
+                              icon="mdi:shield-key", kind=kind)
         await self.service("notify", self.notify_service, {
             "title": f"{self.name} wants a password",
-            "message": f"{kind}: {what}\n{time.strftime('%X')}  [{nonce[:4]}]",
+            "message": f"{time.strftime('%H:%M')}  {kind}: {what}",
             "data": {"tag": f"{self.prefix}-{nonce[:8]}", "url": f"/{self.prefix}-remote/0", "actions": [
                 {"action": f"HAREMOTE_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
                 {"action": f"HAREMOTE_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
