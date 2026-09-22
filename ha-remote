@@ -32,6 +32,7 @@ IDLE_AFTER_MS = 120_000
 PROMPT_POLL_S = 1
 RESEND_AFTER_S = 10
 PROMPT_GONE_S = 3
+LOCKSCREEN_EXPIRE_S = 60
 EPOCH = "1970-01-01T00:00:00+00:00"
 
 SCREEN = Path("/sys/class/backlight/apple-panel-bl")
@@ -87,15 +88,20 @@ def cmdline(pid):
     return read(f"/proc/{pid}/cmdline", "").replace("\0", " ").strip()
 
 
-def sudo_prompting():
+def sudo_prompts():
     # Before authentication sudo has not forked the command yet.
+    waiting = []
     for pid in run("pgrep", "-x", "sudo").stdout.split():
         try:
             if not Path(f"/proc/{pid}/task/{pid}/children").read_text().strip():
-                return int(pid)
+                waiting.append(int(pid))
         except OSError:
             pass
-    return None
+    return waiting
+
+
+def sudo_prompting():
+    return next(iter(sudo_prompts()), None)
 
 
 def stat(pid):
@@ -159,13 +165,21 @@ def window_of(pid):
     return None
 
 
+def focused_window_id():
+    out = run("niri", "msg", "--json", "focused-window").stdout.strip()
+    return json.loads(out).get("id") if out and out != "null" else None
+
+
 def focus_window_of(pid):
     wid = window_of(pid)
     if wid is None:
         return False
     run("niri", "msg", "action", "focus-window", "--id", str(wid))
-    time.sleep(0.3)
-    return True
+    for _ in range(10):
+        time.sleep(0.05)
+        if focused_window_id() == wid:
+            return True
+    return False
 
 
 def kbd_off():
@@ -328,9 +342,7 @@ class Remote:
         else:
             return password_not_typed(f"Focused window {app_id or 'none'} is not an allowed terminal")
         log.info("typing password into %s", target)
-        # Via stdin so the password never appears in argv (/proc/*/cmdline).
-        subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
-        run("wtype", "-k", "Return")
+        self.type_secret()
 
     def request_password(self):
         if noctalia_status().get("locked"):
@@ -445,7 +457,7 @@ class Remote:
         try:
             if time.monotonic() - self.last_run.get(entity_id, -cooldown) < cooldown:
                 log.warning("%s ignored: cooldown", handler.__name__)
-                if handler == self.type_password:
+                if handler == self.request_password:
                     await asyncio.to_thread(password_not_typed, f"Pressed again within {cooldown} s")
                 return
             if entity_id in self.homekit_only:
@@ -453,7 +465,7 @@ class Remote:
                 await asyncio.sleep(1)
                 if time.monotonic() - self.homekit_press.pop(entity_id, -60) > 5:
                     log.warning("%s refused: not pressed from Apple Home", handler.__name__)
-                    if handler == self.type_password:
+                    if handler == self.request_password:
                         await asyncio.to_thread(password_not_typed, "Not pressed from Apple Home")
                     return
             self.last_run[entity_id] = time.monotonic()
@@ -462,7 +474,7 @@ class Remote:
             await asyncio.wait_for(asyncio.to_thread(handler), 30)
         except (Exception, SystemExit) as e:
             log.exception("%s failed", handler.__name__)
-            if handler == self.type_password:
+            if handler == self.request_password:
                 await asyncio.to_thread(password_not_typed, f"{type(e).__name__}: {e}"[:120])
         finally:
             if reset_first is False:
@@ -548,11 +560,11 @@ class Remote:
         if status.get("activePanelId") == "polkit":
             pkexec = [pid for pid in run("pgrep", "-x", "pkexec").stdout.split() if "zombie" not in read(f"/proc/{pid}/status", "")]
             if pkexec:
-                return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec "))
+                return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec ")[:120])
             return ("polkit", 0, "a system action")
         sudo_pid = sudo_prompting()
         if sudo_pid:
-            return ("sudo", sudo_pid, cmdline(sudo_pid).removeprefix("sudo ") or "sudo")
+            return ("sudo", sudo_pid, (cmdline(sudo_pid).removeprefix("sudo ") or "sudo")[:120])
         return None
 
     def snapshot(self):
@@ -617,7 +629,7 @@ class Remote:
         else:
             if self.pending:
                 await self.clear_notification(self.pending["nonce"])
-            nonce = secrets.token_urlsafe(16)
+            nonce = secrets.token_hex(16)
             self.pending = {"kind": kind, "pid": pid, "nonce": nonce, "prompt": prompt}
         self.last_ask = time.monotonic()
         log.info("asking approval for %s: %s", kind, what)
@@ -649,15 +661,45 @@ class Remote:
             if (self.pending is None or self.pending["prompt"][:2] != prompt[:2]) and not handled \
                     and self.cfg.get("notify_prompts", True):
                 await self.ask_approval(prompt)
-        elif self.pending and self.pending["kind"] != "lockscreen":
+        elif self.pending and self.pending["kind"] == "lockscreen":
+            # An accidental bump should not leave an approval waiting indefinitely.
+            if time.monotonic() - self.last_ask > LOCKSCREEN_EXPIRE_S:
+                log.info("lock screen request expired")
+                await self.clear_approval()
+        elif self.pending:
             self.prompt_gone_since = self.prompt_gone_since or time.monotonic()
             if time.monotonic() - self.prompt_gone_since > PROMPT_GONE_S:
                 await self.clear_approval()
 
     def approve(self, pending):
-        if pending["kind"] == "sudo" and not focus_window_of(pending["pid"]):
-            return password_not_typed("Could not find the terminal window")
-        self.type_password()
+        kind, pid = pending["kind"], pending["pid"]
+        status = noctalia_status()
+        if kind == "lockscreen":
+            if not status.get("locked"):
+                return password_not_typed("The screen is no longer locked")
+            run("niri", "msg", "action", "power-on-monitors")
+            self.screen_off = False
+            time.sleep(0.5)
+        elif kind == "polkit":
+            if status.get("activePanelId") != "polkit":
+                return password_not_typed("The polkit prompt is gone")
+        elif kind == "sudo":
+            if status.get("locked") or status.get("panelOpen"):
+                return password_not_typed("Screen is locked or a panel is open")
+            if pid not in sudo_prompts():
+                return password_not_typed("That sudo prompt is gone")
+            if not focus_window_of(pid):
+                return password_not_typed("Could not focus the terminal window")
+            # Re-check after focusing: the prompt may have died and left a shell in that window.
+            if pid not in sudo_prompts():
+                return password_not_typed("That sudo prompt is gone")
+        log.info("typing password into %s", kind)
+        self.type_secret()
+
+    def type_secret(self):
+        # Via stdin so the password never appears in argv (/proc/*/cmdline).
+        subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
+        run("wtype", "-k", "Return")
 
     def deny(self, pending):
         log.info("denying %s prompt", pending["kind"])
