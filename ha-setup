@@ -76,6 +76,31 @@ def main():
     for command, result in zip(create, asyncio.run(ws_send(create)) if create else []):
         print(command["name"], result.get("success"))
 
+    buttons = [{"type": "input_button/create", "name": f"M2 {n}", "icon": i}
+               for n, i in (("Approve", "mdi:check-bold"), ("Deny", "mdi:close-thick"))
+               if not call("GET", f"/api/states/input_button.m2_{n.lower()}").get("entity_id")]
+    for command, result in zip(buttons, asyncio.run(ws_send(buttons)) if buttons else []):
+        print(command["name"], result.get("success"))
+    dashboards = asyncio.run(ws_send([{"type": "lovelace/dashboards/list"}]))[0]["result"]
+    if not any(d.get("url_path") == "m2-laptop" for d in dashboards):
+        asyncio.run(ws_send([{"type": "lovelace/dashboards/create", "url_path": "m2-laptop", "title": "M2",
+                              "icon": "mdi:laptop", "show_in_sidebar": True, "require_admin": False}]))
+    press = lambda e: {"action": "call-service", "service": "input_button.press", "target": {"entity_id": e}}
+    view = {"title": "M2", "path": "0", "cards": [
+        {"type": "entities", "title": "Password request", "entities": [{"entity": "sensor.m2_request", "name": "Waiting for"}]},
+        {"type": "horizontal-stack", "cards": [
+            {"type": "button", "entity": "input_button.m2_approve", "name": "Approve", "tap_action": press("input_button.m2_approve")},
+            {"type": "button", "entity": "input_button.m2_deny", "name": "Deny", "tap_action": press("input_button.m2_deny")}]},
+        {"type": "entities", "title": "Controls", "entities": [
+            "input_boolean.m2_lock", "input_boolean.m2_type_password", "input_boolean.m2_suspend", "input_boolean.m2_power_off",
+            "input_boolean.m2_next_track", "input_boolean.m2_autobuild", "light.m2_screen", "light.m2_keyboard", "fan.m2_music"]},
+        {"type": "entities", "title": "Status", "entities": [
+            "binary_sensor.m2_online", "binary_sensor.m2_locked", "binary_sensor.m2_active", "sensor.m2_battery",
+            "sensor.m2_battery_state", "binary_sensor.m2_plugged_in", "sensor.m2_power", "sensor.m2_fan_1", "sensor.m2_fan_2",
+            "sensor.m2_music"]}]}
+    print("dashboard", asyncio.run(ws_send([{"type": "lovelace/config/save", "url_path": "m2-laptop",
+                                             "config": {"views": [view]}}]))[0].get("success"))
+
     for target in ("screen", "keyboard"):
         sensor = f"sensor.m2_{target}_brightness"
         template("light", {"name": f"M2 {target.capitalize()}",

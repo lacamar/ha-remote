@@ -29,7 +29,8 @@ STUCK_AFTER_S = 30
 CONFIRM_WINDOW_S = 20
 IDLE_AFTER_MS = 120_000
 PROMPT_POLL_S = 1
-REASK_AFTER_S = 30
+RESEND_AFTER_S = 10
+PROMPT_GONE_S = 3
 EPOCH = "1970-01-01T00:00:00+00:00"
 
 SCREEN = Path("/sys/class/backlight/apple-panel-bl")
@@ -222,7 +223,10 @@ class Remote:
         self.homekit_only = set(cfg.get("homekit_only", []))
         self.homekit_press = {}
         self.pending = None
-        self.last_ask = -REASK_AFTER_S
+        self.last_ask = -RESEND_AFTER_S
+        self.prompt_gone_since = None
+        self.approve_button = ha.get("approve_entity", "input_button.m2_approve")
+        self.deny_button = ha.get("deny_entity", "input_button.m2_deny")
         self.approver = ha.get("approver", {})
         self.was_locked_now = False
         self.screen_off = False
@@ -242,7 +246,7 @@ class Remote:
                 self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.ask_unlock()))
 
     async def ask_unlock(self):
-        if time.monotonic() - self.last_ask >= REASK_AFTER_S and self.notify_service:
+        if time.monotonic() - self.last_ask >= RESEND_AFTER_S and self.notify_service:
             await self.ask_approval(("lockscreen", 0, "unlock the screen"))
 
     # ---- actions (run in a worker thread)
@@ -287,7 +291,7 @@ class Remote:
             prompt = self.snapshot()["prompt"]
         if not prompt:
             return password_not_typed("Nothing is asking for a password")
-        if self.pending and time.monotonic() - self.last_ask < REASK_AFTER_S:
+        if self.pending and time.monotonic() - self.last_ask < RESEND_AFTER_S:
             return password_not_typed("An approval request is already on your phone")
         self.from_thread(self.ask_approval(prompt))
 
@@ -445,6 +449,8 @@ class Remote:
                                 "trigger": {"platform": "state", "entity_id": self.job_entity, "from": "on", "to": "off"}})
             await ws.send_json({"id": 4, "type": "subscribe_events", "event_type": "homekit_state_change"})
             await ws.send_json({"id": 5, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
+            await ws.send_json({"id": 6, "type": "subscribe_trigger", "trigger": {
+                "platform": "state", "entity_id": [self.approve_button, self.deny_button]}})
             # Left on while we were offline: clear without running.
             for entity_id in self.actions:
                 if entity_id != self.job_entity:
@@ -472,6 +478,11 @@ class Remote:
                 if data["id"] == 5:
                     if data["event"]["data"].get("action", "").startswith("M2_"):
                         asyncio.create_task(self.on_notification_action(data["event"]))
+                    continue
+                if data["id"] == 6:
+                    trigger = data["event"]["variables"]["trigger"]
+                    if trigger.get("from_state") is not None:
+                        asyncio.create_task(self.on_button(trigger))
                     continue
                 if data["id"] == 3:
                     # The agent only turns this off itself once the job is gone, so this is the user.
@@ -511,6 +522,8 @@ class Remote:
     async def publish(self):
         s = await asyncio.to_thread(self.snapshot)
         self.was_locked_now = s["locked"]
+        if not s["locked"] and self.pending and self.pending["kind"] == "lockscreen":
+            await self.clear_approval()
         if not s["locked"]:
             await asyncio.to_thread(kbd_restore)
         for target in ("screen", "keyboard"):
@@ -548,28 +561,39 @@ class Remote:
 
     async def ask_approval(self, prompt):
         kind, pid, what = prompt
-        nonce = secrets.token_urlsafe(16)
-        self.pending = {"kind": kind, "pid": pid, "nonce": nonce}
+        if self.pending and self.pending["prompt"] == prompt:
+            # Same prompt keeps its code, so an earlier notification for it stays valid.
+            nonce = self.pending["nonce"]
+        else:
+            nonce = secrets.token_urlsafe(16)
+            self.pending = {"kind": kind, "pid": pid, "nonce": nonce, "prompt": prompt}
         self.last_ask = time.monotonic()
         log.info("asking approval for %s: %s", kind, what)
+        await self.post_state("sensor.m2_request", f"{kind}: {what}"[:255], friendly_name="M2 request",
+                              icon="mdi:shield-key", kind=kind, code=nonce[:4])
         await self.service("notify", self.notify_service, {
-            "title": "M2 wants a password", "message": f"{kind}: {what}",
-            "data": {"tag": "m2-prompt", "actions": [
+            "title": "M2 wants a password", "message": f"{kind}: {what}  [{nonce[:4]}]",
+            "data": {"tag": "m2-prompt", "url": "/m2-laptop/0", "actions": [
                 {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
                 {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
 
     async def clear_approval(self):
         self.pending = None
+        await self.post_state("sensor.m2_request", "none", friendly_name="M2 request", icon="mdi:shield-key")
         await self.service("notify", self.notify_service,
                            {"message": "clear_notification", "data": {"tag": "m2-prompt"}})
 
     async def watch_prompts(self, prompt):
         if not self.notify_service:
             return
-        if prompt and self.pending is None and self.cfg.get("notify_prompts", True):
-            await self.ask_approval(prompt)
-        elif self.pending and not prompt and (self.pending["kind"] != "lockscreen" or not self.was_locked_now):
-            await self.clear_approval()
+        if prompt:
+            self.prompt_gone_since = None
+            if (self.pending is None or self.pending["prompt"] != prompt) and self.cfg.get("notify_prompts", True):
+                await self.ask_approval(prompt)
+        elif self.pending and self.pending["kind"] != "lockscreen":
+            self.prompt_gone_since = self.prompt_gone_since or time.monotonic()
+            if time.monotonic() - self.prompt_gone_since > PROMPT_GONE_S:
+                await self.clear_approval()
 
     def approve(self, pending):
         if pending["kind"] == "sudo" and not focus_window_of(pending["pid"]):
@@ -583,17 +607,34 @@ class Remote:
         else:
             run("noctalia", "msg", "panel-close", "polkit")
 
+    def sender_ok(self, context):
+        sender = {"user_id": (context or {}).get("user_id")}
+        if any(sender.get(k) != v for k, v in self.approver.items()):
+            log.warning("ignoring approval from %s", sender)
+            return False
+        return True
+
     async def on_notification_action(self, event):
         action = event["data"].get("action", "")
         verb, _, nonce = action.rpartition("_")
         pending = self.pending
         if not pending or not secrets.compare_digest(nonce, pending["nonce"]):
-            return log.warning("ignoring stale notification action")
-        sender = {"user_id": event.get("context", {}).get("user_id"), "device_id": event["data"].get("device_id")}
-        if any(sender.get(k) != v for k, v in self.approver.items()):
-            log.warning("ignoring notification action from %s", sender)
-            return await asyncio.to_thread(password_not_typed, "Approval came from an unknown device")
-        self.pending = None
+            log.warning("ignoring stale notification action")
+            return await asyncio.to_thread(password_not_typed, "That request is no longer current")
+        if not self.sender_ok(event.get("context")):
+            return await asyncio.to_thread(password_not_typed, "Approval came from an unknown user")
+        await self.decide(verb, pending)
+
+    async def on_button(self, trigger):
+        if not self.sender_ok(trigger["to_state"].get("context")):
+            return
+        pending = self.pending
+        if not pending:
+            return log.warning("%s pressed with nothing pending", trigger["entity_id"])
+        await self.decide("M2_APPROVE" if trigger["entity_id"] == self.approve_button else "M2_DENY", pending)
+
+    async def decide(self, verb, pending):
+        await self.clear_approval()
         handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
         if handler:
             try:
