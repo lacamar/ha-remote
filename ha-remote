@@ -28,6 +28,8 @@ COOLDOWN_S = 5
 STUCK_AFTER_S = 30
 CONFIRM_WINDOW_S = 20
 IDLE_AFTER_MS = 120_000
+PROMPT_POLL_S = 1
+REASK_AFTER_S = 30
 EPOCH = "1970-01-01T00:00:00+00:00"
 
 SCREEN = Path("/sys/class/backlight/apple-panel-bl")
@@ -204,7 +206,7 @@ class Remote:
         # entity -> (handler, cooldown seconds, reset the toggle before running)
         self.actions = {
             ha.get("lock_entity", "input_boolean.m2_lock"): (self.lock, COOLDOWN_S, False),
-            ha.get("type_password_entity", "input_boolean.m2_type_password"): (self.type_password, COOLDOWN_S, False),
+            ha.get("type_password_entity", "input_boolean.m2_type_password"): (self.request_password, COOLDOWN_S, False),
             ha.get("suspend_entity", "input_boolean.m2_suspend"): (self.suspend, COOLDOWN_S, True),
             ha.get("power_off_entity", "input_boolean.m2_power_off"): (self.power_off, 1, True),
             ha.get("next_track_entity", "input_boolean.m2_next_track"): (self.next_track, 1, False),
@@ -220,6 +222,9 @@ class Remote:
         self.homekit_only = set(cfg.get("homekit_only", []))
         self.homekit_press = {}
         self.pending = None
+        self.last_ask = -REASK_AFTER_S
+        self.approver = ha.get("approver", {})
+        self.was_locked_now = False
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
         self.sent = {}
@@ -233,6 +238,12 @@ class Remote:
         self.screen_off = False
         if self.loop:
             self.loop.call_soon_threadsafe(self.poll_now.set)
+            if self.was_locked_now:
+                self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.ask_unlock()))
+
+    async def ask_unlock(self):
+        if time.monotonic() - self.last_ask >= REASK_AFTER_S and self.notify_service:
+            await self.ask_approval(("lockscreen", 0, "unlock the screen"))
 
     # ---- actions (run in a worker thread)
 
@@ -268,6 +279,17 @@ class Remote:
         # Via stdin so the password never appears in argv (/proc/*/cmdline).
         subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
         run("wtype", "-k", "Return")
+
+    def request_password(self):
+        if noctalia_status().get("locked"):
+            prompt = ("lockscreen", 0, "unlock the screen")
+        else:
+            prompt = self.snapshot()["prompt"]
+        if not prompt:
+            return password_not_typed("Nothing is asking for a password")
+        if self.pending and time.monotonic() - self.last_ask < REASK_AFTER_S:
+            return password_not_typed("An approval request is already on your phone")
+        self.from_thread(self.ask_approval(prompt))
 
     def suspend(self):
         log.info("suspending")
@@ -448,9 +470,8 @@ class Remote:
                         self.homekit_press[hk.get("entity_id")] = time.monotonic()
                     continue
                 if data["id"] == 5:
-                    action = data["event"]["data"].get("action", "")
-                    if action.startswith("M2_"):
-                        asyncio.create_task(self.on_notification_action(action))
+                    if data["event"]["data"].get("action", "").startswith("M2_"):
+                        asyncio.create_task(self.on_notification_action(data["event"]))
                     continue
                 if data["id"] == 3:
                     # The agent only turns this off itself once the job is gone, so this is the user.
@@ -463,17 +484,19 @@ class Remote:
                 if trigger["entity_id"] in self.actions:
                     asyncio.create_task(self.call(trigger["entity_id"]))
 
-    def snapshot(self):
-        status = noctalia_status()
-        sudo_pid = sudo_prompting()
+    def snapshot_prompt(self, status=None):
+        status = status or noctalia_status()
         if status.get("activePanelId") == "polkit":
             pkexec = run("pgrep", "-x", "pkexec").stdout.split()
-            prompt = ("polkit", 0, cmdline(pkexec[0]).removeprefix("pkexec ") if pkexec else "a system action")
-        elif sudo_pid:
-            prompt = ("sudo", sudo_pid, cmdline(sudo_pid).removeprefix("sudo ") or "sudo")
-        else:
-            prompt = None
-        snap = {"locked": status.get("locked"), "prompt": prompt, "screen": percent(SCREEN), "keyboard": percent(KBD),
+            return ("polkit", 0, cmdline(pkexec[0]).removeprefix("pkexec ") if pkexec else "a system action")
+        sudo_pid = sudo_prompting()
+        if sudo_pid:
+            return ("sudo", sudo_pid, cmdline(sudo_pid).removeprefix("sudo ") or "sudo")
+        return None
+
+    def snapshot(self):
+        status = noctalia_status()
+        snap = {"locked": status.get("locked"), "prompt": self.snapshot_prompt(status), "screen": percent(SCREEN), "keyboard": percent(KBD),
                 "battery": read(BATTERY / "capacity"), "battery_state": read(BATTERY / "status"),
                 "plugged": read(AC / "online") == "1", "power": system_power_w(), "job": self.job_active()}
         status = run("playerctl", "-p", self.player, "status").stdout.strip()
@@ -487,6 +510,7 @@ class Remote:
 
     async def publish(self):
         s = await asyncio.to_thread(self.snapshot)
+        self.was_locked_now = s["locked"]
         if not s["locked"]:
             await asyncio.to_thread(kbd_restore)
         for target in ("screen", "keyboard"):
@@ -522,23 +546,30 @@ class Remote:
                 await self.post_state(f"sensor.m2_{key}_temp", round(value / 1000, 1), friendly_name=f"M2 {label}",
                                       device_class="temperature", unit_of_measurement="°C", state_class="measurement")
 
+    async def ask_approval(self, prompt):
+        kind, pid, what = prompt
+        nonce = secrets.token_urlsafe(16)
+        self.pending = {"kind": kind, "pid": pid, "nonce": nonce}
+        self.last_ask = time.monotonic()
+        log.info("asking approval for %s: %s", kind, what)
+        await self.service("notify", self.notify_service, {
+            "title": "M2 wants a password", "message": f"{kind}: {what}",
+            "data": {"tag": "m2-prompt", "actions": [
+                {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
+                {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
+
+    async def clear_approval(self):
+        self.pending = None
+        await self.service("notify", self.notify_service,
+                           {"message": "clear_notification", "data": {"tag": "m2-prompt"}})
+
     async def watch_prompts(self, prompt):
-        if not self.notify_service or not self.cfg.get("notify_prompts", True):
+        if not self.notify_service:
             return
-        if prompt and self.pending is None:
-            kind, pid, what = prompt
-            nonce = secrets.token_urlsafe(8)
-            self.pending = {"kind": kind, "pid": pid, "nonce": nonce}
-            log.info("%s prompt appeared: %s", kind, what)
-            await self.service("notify", self.notify_service, {
-                "title": "M2 wants a password", "message": f"{kind}: {what}",
-                "data": {"tag": "m2-prompt", "actions": [
-                    {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
-                    {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
-        elif not prompt and self.pending:
-            self.pending = None
-            await self.service("notify", self.notify_service,
-                               {"message": "clear_notification", "data": {"tag": "m2-prompt"}})
+        if prompt and self.pending is None and self.cfg.get("notify_prompts", True):
+            await self.ask_approval(prompt)
+        elif self.pending and not prompt and (self.pending["kind"] != "lockscreen" or not self.was_locked_now):
+            await self.clear_approval()
 
     def approve(self, pending):
         if pending["kind"] == "sudo" and not focus_window_of(pending["pid"]):
@@ -552,11 +583,16 @@ class Remote:
         else:
             run("noctalia", "msg", "panel-close", "polkit")
 
-    async def on_notification_action(self, action):
+    async def on_notification_action(self, event):
+        action = event["data"].get("action", "")
         verb, _, nonce = action.rpartition("_")
         pending = self.pending
-        if not pending or nonce != pending["nonce"]:
-            return log.warning("ignoring stale notification action %s", action)
+        if not pending or not secrets.compare_digest(nonce, pending["nonce"]):
+            return log.warning("ignoring stale notification action")
+        sender = {"user_id": event.get("context", {}).get("user_id"), "device_id": event["data"].get("device_id")}
+        if any(sender.get(k) != v for k, v in self.approver.items()):
+            log.warning("ignoring notification action from %s", sender)
+            return await asyncio.to_thread(password_not_typed, "Approval came from an unknown device")
         self.pending = None
         handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
         if handler:
@@ -602,6 +638,14 @@ class Remote:
                 log.warning("%s stuck on: clearing", entity_id)
                 await self.set_toggle(entity_id, False)
 
+    async def prompt_loop(self):
+        while True:
+            try:
+                await self.watch_prompts((await asyncio.to_thread(self.snapshot_prompt)))
+            except Exception as e:
+                log.debug("prompt poll failed: %s", e)
+            await asyncio.sleep(PROMPT_POLL_S)
+
     async def poll(self):
         slow = 0.0
         while True:
@@ -615,7 +659,6 @@ class Remote:
                     await self.post_state("sensor.m2_last_seen",
                                           datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                           friendly_name="M2 last seen", device_class="timestamp")
-                await self.watch_prompts(s["prompt"])
                 await self.mirror_job(s["job"])
                 await self.unstick()
             except Exception as e:
@@ -635,6 +678,7 @@ class Remote:
         async with aiohttp.ClientSession(headers=headers, timeout=timeout) as self.session:
             queue = asyncio.Queue()
             asyncio.create_task(self.poll())
+            asyncio.create_task(self.prompt_loop())
             asyncio.create_task(self.commands(queue))
             delay = 1
             while True:

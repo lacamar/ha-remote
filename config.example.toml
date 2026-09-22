@@ -3,7 +3,7 @@ device_name = "M2"
 allowed_app_ids = ["foot", "footclient", "spterminal"]
 player = "Feishin"
 job_unit = "autobuild-everything.service"
-homekit_only = ["input_boolean.m2_type_password"]
+homekit_only = []
 
 [ha]
 url = "https://homeassistant.example.ts.net"
@@ -15,3 +15,7 @@ notify_service = "mobile_app_phone"
 person = "person.me"
 desk_switch = "switch.desk"
 notify_prompts = true
+
+# Only notification actions fired by this HA user (the phone app's login) may approve typing.
+[ha.approver]
+user_id = "<ha user id>"
