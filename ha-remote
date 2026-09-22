@@ -4,6 +4,8 @@ import glob
 import json
 import logging
 import os
+import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -77,14 +79,42 @@ def focused_app_id():
     return window.get("app_id") if window else None
 
 
+def cmdline(pid):
+    return read(f"/proc/{pid}/cmdline", "").replace("\0", " ").strip()
+
+
 def sudo_prompting():
     # Before authentication sudo has not forked the command yet.
     for pid in run("pgrep", "-x", "sudo").stdout.split():
         try:
             if not Path(f"/proc/{pid}/task/{pid}/children").read_text().strip():
-                return True
+                return int(pid)
         except OSError:
             pass
+    return None
+
+
+def stat(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return int(fields[1]), int(fields[4])
+    except (OSError, IndexError, ValueError):
+        return 0, -1
+
+
+def focus_window_of(pid):
+    windows = {w.get("pid"): w["id"] for w in json.loads(run("niri", "msg", "--json", "windows").stdout)}
+    _, tty = stat(pid)
+    while pid > 1:
+        if pid in windows:
+            run("niri", "msg", "action", "focus-window", "--id", str(windows[pid]))
+            time.sleep(0.3)
+            return True
+        ppid, ptty = stat(pid)
+        # Only climb through the shell on the same tty; the terminal itself has none.
+        if ptty != tty and ppid not in windows:
+            return False
+        pid = ppid
     return False
 
 
@@ -189,7 +219,7 @@ class Remote:
         self.job_cancelled = False
         self.homekit_only = set(cfg.get("homekit_only", []))
         self.homekit_press = {}
-        self.prompt_seen = False
+        self.pending = None
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
         self.sent = {}
@@ -392,6 +422,7 @@ class Remote:
             await ws.send_json({"id": 3, "type": "subscribe_trigger",
                                 "trigger": {"platform": "state", "entity_id": self.job_entity, "from": "on", "to": "off"}})
             await ws.send_json({"id": 4, "type": "subscribe_events", "event_type": "homekit_state_change"})
+            await ws.send_json({"id": 5, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
             # Left on while we were offline: clear without running.
             for entity_id in self.actions:
                 if entity_id != self.job_entity:
@@ -416,6 +447,11 @@ class Remote:
                     if hk.get("service") == "turn_on":
                         self.homekit_press[hk.get("entity_id")] = time.monotonic()
                     continue
+                if data["id"] == 5:
+                    action = data["event"]["data"].get("action", "")
+                    if action.startswith("M2_"):
+                        asyncio.create_task(self.on_notification_action(action))
+                    continue
                 if data["id"] == 3:
                     # The agent only turns this off itself once the job is gone, so this is the user.
                     asyncio.create_task(asyncio.to_thread(self.cancel_job))
@@ -429,7 +465,15 @@ class Remote:
 
     def snapshot(self):
         status = noctalia_status()
-        snap = {"locked": status.get("locked"), "prompt": status.get("activePanelId") == "polkit" or sudo_prompting(), "screen": percent(SCREEN), "keyboard": percent(KBD),
+        sudo_pid = sudo_prompting()
+        if status.get("activePanelId") == "polkit":
+            pkexec = run("pgrep", "-x", "pkexec").stdout.split()
+            prompt = ("polkit", 0, cmdline(pkexec[0]).removeprefix("pkexec ") if pkexec else "a system action")
+        elif sudo_pid:
+            prompt = ("sudo", sudo_pid, cmdline(sudo_pid).removeprefix("sudo ") or "sudo")
+        else:
+            prompt = None
+        snap = {"locked": status.get("locked"), "prompt": prompt, "screen": percent(SCREEN), "keyboard": percent(KBD),
                 "battery": read(BATTERY / "capacity"), "battery_state": read(BATTERY / "status"),
                 "plugged": read(AC / "online") == "1", "power": system_power_w(), "job": self.job_active()}
         status = run("playerctl", "-p", self.player, "status").stdout.strip()
@@ -479,12 +523,50 @@ class Remote:
                                       device_class="temperature", unit_of_measurement="°C", state_class="measurement")
 
     async def watch_prompts(self, prompt):
-        if prompt and not self.prompt_seen and self.notify_service and self.cfg.get("notify_prompts", True):
-            log.info("password prompt appeared")
+        if not self.notify_service or not self.cfg.get("notify_prompts", True):
+            return
+        if prompt and self.pending is None:
+            kind, pid, what = prompt
+            nonce = secrets.token_urlsafe(8)
+            self.pending = {"kind": kind, "pid": pid, "nonce": nonce}
+            log.info("%s prompt appeared: %s", kind, what)
+            await self.service("notify", self.notify_service, {
+                "title": "M2 wants a password", "message": f"{kind}: {what}",
+                "data": {"tag": "m2-prompt", "actions": [
+                    {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
+                    {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
+        elif not prompt and self.pending:
+            self.pending = None
             await self.service("notify", self.notify_service,
-                               {"title": "M2 wants a password", "message": "A sudo or polkit prompt is waiting.",
-                                "data": {"tag": "m2-prompt"}})
-        self.prompt_seen = prompt
+                               {"message": "clear_notification", "data": {"tag": "m2-prompt"}})
+
+    def approve(self, pending):
+        if pending["kind"] == "sudo" and not focus_window_of(pending["pid"]):
+            return password_not_typed("Could not find the terminal window")
+        self.type_password()
+
+    def deny(self, pending):
+        log.info("denying %s prompt", pending["kind"])
+        if pending["kind"] == "sudo":
+            os.kill(pending["pid"], signal.SIGINT)
+        else:
+            run("noctalia", "msg", "panel-close", "polkit")
+
+    async def on_notification_action(self, action):
+        verb, _, nonce = action.rpartition("_")
+        pending = self.pending
+        if not pending or nonce != pending["nonce"]:
+            return log.warning("ignoring stale notification action %s", action)
+        self.pending = None
+        handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
+        if handler:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(handler, pending), 30)
+            except Exception as e:
+                log.exception("%s failed", verb)
+                if verb == "M2_APPROVE":
+                    await asyncio.to_thread(password_not_typed, f"{type(e).__name__}: {e}"[:120])
+        self.poll_now.set()
 
     async def mirror_job(self, active):
         if active != self.job_was_active and time.monotonic() - self.job_started > 10:
