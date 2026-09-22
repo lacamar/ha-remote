@@ -5,6 +5,7 @@ import json
 import locale
 import logging
 import os
+import re
 import secrets
 import signal
 import socket
@@ -22,7 +23,8 @@ log = logging.getLogger("ha-remote")
 
 HOME = Path.home()
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ha-remote" / "config.toml"
-PROTOCOLS = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "ha-remote" / "protocols"
+PROTOCOL_DIRS = [Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "ha-remote" / "protocols",
+                 Path("/usr/share/ha-remote/protocols")]
 KBD_SAVE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ha-remote-kbd"
 SECRET_SERVICE = "ha-remote"
 COOLDOWN_S = 5
@@ -35,10 +37,16 @@ PROMPT_GONE_S = 3
 LOCKSCREEN_EXPIRE_S = 60
 EPOCH = "1970-01-01T00:00:00+00:00"
 
-SCREEN = Path("/sys/class/backlight/apple-panel-bl")
-KBD = Path("/sys/class/leds/kbd_backlight")
-BATTERY = Path("/sys/class/power_supply/macsmc-battery")
-AC = Path("/sys/class/power_supply/macsmc-ac")
+
+
+def first(pattern, where=lambda p: True):
+    return next((Path(p) for p in sorted(glob.glob(pattern)) if where(p)), None)
+
+
+SCREEN = first("/sys/class/backlight/*")
+KBD = first("/sys/class/leds/*kbd_backlight*")
+BATTERY = first("/sys/class/power_supply/*", lambda p: Path(p, "type").read_text().strip() == "Battery")
+AC = first("/sys/class/power_supply/*", lambda p: Path(p, "type").read_text().strip() == "Mains")
 
 
 def secret(key):
@@ -61,17 +69,20 @@ def read(path, default=None):
 
 
 def percent(device):
+    if device is None:
+        return None
     cur, top = read(device / "brightness"), read(device / "max_brightness")
     return round(int(cur) * 100 / int(top)) if cur and top else None
 
 
 def set_percent(device, pct):
-    run("brightnessctl", "-d", device.name, "set", f"{max(0, min(100, pct))}%")
+    if device is not None:
+        run("brightnessctl", "-d", device.name, "set", f"{max(0, min(100, pct))}%")
 
 
 def password_not_typed(reason):
     log.warning("type_password: %s", reason)
-    run("notify-send", "-e", "-u", "low", "-a", "M2 remote", "Password not typed", reason)
+    run("notify-send", "-e", "-u", "low", "-a", "ha-remote", "Password not typed", reason)
 
 
 def noctalia_status():
@@ -183,6 +194,8 @@ def focus_window_of(pid):
 
 
 def kbd_off():
+    if KBD is None:
+        return
     # Save only once, or a second lock would save 0 and unlock would restore darkness.
     if not KBD_SAVE.exists():
         KBD_SAVE.write_text(read(KBD / "brightness", "0"))
@@ -198,10 +211,10 @@ def kbd_restore():
         run("brightnessctl", "-d", KBD.name, "set", value)
 
 
-def smc():
+def smc(name="macsmc_hwmon"):
     out = {}
     for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
-        if read(f"{hwmon}/name") != "macsmc_hwmon":
+        if read(f"{hwmon}/name") != name:
             continue
         for label in glob.glob(f"{hwmon}/*_label"):
             value = read(label.replace("_label", "_input"))
@@ -210,8 +223,8 @@ def smc():
     return out
 
 
-def system_power_w():
-    value = smc().get("Total System Power")
+def system_power_w(name="macsmc_hwmon"):
+    value = smc(name).get("Total System Power")
     return None if value is None else round(value / 1e6)
 
 
@@ -223,7 +236,7 @@ class Idle(threading.Thread):
 
     def run(self):
         try:
-            sys.path.insert(0, str(PROTOCOLS))
+            sys.path[:0] = [str(d) for d in PROTOCOL_DIRS if d.is_dir()]
             from pywayland.client import Display
             from hrproto.ext_idle_notify_v1 import ExtIdleNotifierV1
             from hrproto.wayland import WlSeat
@@ -253,6 +266,10 @@ class Idle(threading.Thread):
             log.exception("idle watcher stopped")
 
 
+def prefix(cfg):
+    return re.sub(r"[^a-z0-9]+", "_", cfg.get("prefix") or socket.gethostname().split(".")[0].lower()).strip("_")
+
+
 class Remote:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -260,18 +277,24 @@ class Remote:
         self.url = ha["url"].rstrip("/")
         self.token = secret("token")
         self.notify_service = ha.get("notify_service")
-        self.player = cfg.get("player", "Feishin")
-        self.job_unit = cfg.get("job_unit", "autobuild-everything.service")
+        self.player = cfg.get("player", "")
+        self.job_unit = cfg.get("job_unit", "")
         self.allowed_app_ids = set(cfg.get("allowed_app_ids", []))
-        self.locked_entity = ha.get("locked_entity", "binary_sensor.m2_locked")
-        self.job_entity = ha.get("job_entity", "input_boolean.m2_autobuild")
+        self.prefix = prefix(cfg)
+        self.name = cfg.get("device_name", self.prefix.upper())
+        self.hwmon = cfg.get("hwmon", "macsmc_hwmon")
+        e = lambda domain, obj: f"{domain}.{self.prefix}_{obj}"
+        self.locked_entity = e("binary_sensor", "locked")
+        self.job_entity = e("input_boolean", "job")
+        self.approve_button = e("input_button", "approve")
+        self.deny_button = e("input_button", "deny")
         # entity -> (handler, cooldown seconds, reset the toggle before running)
         self.actions = {
-            ha.get("lock_entity", "input_boolean.m2_lock"): (self.lock, COOLDOWN_S, False),
-            ha.get("type_password_entity", "input_boolean.m2_type_password"): (self.request_password, COOLDOWN_S, False),
-            ha.get("suspend_entity", "input_boolean.m2_suspend"): (self.suspend, COOLDOWN_S, True),
-            ha.get("power_off_entity", "input_boolean.m2_power_off"): (self.power_off, 1, True),
-            ha.get("next_track_entity", "input_boolean.m2_next_track"): (self.next_track, 1, False),
+            e("input_boolean", "lock"): (self.lock, COOLDOWN_S, False),
+            e("input_boolean", "type_password"): (self.request_password, COOLDOWN_S, False),
+            e("input_boolean", "suspend"): (self.suspend, COOLDOWN_S, True),
+            e("input_boolean", "power_off"): (self.power_off, 1, True),
+            e("input_boolean", "next_track"): (self.next_track, 1, False),
             self.job_entity: (self.start_job, COOLDOWN_S, None),
         }
         self.busy = set()
@@ -287,8 +310,6 @@ class Remote:
         self.last_ask = -RESEND_AFTER_S
         self.prompt_gone_since = None
         self.handled = {}
-        self.approve_button = ha.get("approve_entity", "input_button.m2_approve")
-        self.deny_button = ha.get("deny_entity", "input_button.m2_deny")
         self.approver = ha.get("approver", {})
         self.was_locked_now = False
         self.screen_off = False
@@ -365,7 +386,7 @@ class Remote:
         if now - self.armed_at > CONFIRM_WINDOW_S:
             self.armed_at = now
             log.info("power off armed")
-            self.notify("M2 power off", f"Press again within {CONFIRM_WINDOW_S} s to power off.")
+            self.notify(f"{self.name} power off", f"Press again within {CONFIRM_WINDOW_S} s to power off.")
             return
         log.info("powering off")
         self.say_offline()
@@ -375,6 +396,8 @@ class Remote:
         run("playerctl", "-p", self.player, "next")
 
     def job_active(self):
+        if not self.job_unit:
+            return False
         return run("systemctl", "--user", "is-active", self.job_unit).stdout.strip() in ("active", "activating")
 
     def start_job(self):
@@ -425,7 +448,7 @@ class Remote:
 
     def say_offline(self):
         try:
-            self.from_thread(self.post_state("sensor.m2_last_seen", EPOCH, device_class="timestamp"))
+            self.from_thread(self.post_state(f"sensor.{self.prefix}_last_seen", EPOCH, device_class="timestamp"))
         except Exception as e:
             log.warning("offline notice failed: %s", e)
 
@@ -536,7 +559,7 @@ class Remote:
                         self.homekit_press[hk.get("entity_id")] = time.monotonic()
                     continue
                 if data["id"] == 5:
-                    if data["event"]["data"].get("action", "").startswith("M2_"):
+                    if data["event"]["data"].get("action", "").startswith("HAREMOTE_"):
                         asyncio.create_task(self.on_notification_action(data["event"]))
                     continue
                 if data["id"] == 6:
@@ -571,8 +594,8 @@ class Remote:
         status = noctalia_status()
         snap = {"locked": status.get("locked"), "prompt": self.snapshot_prompt(status), "screen": percent(SCREEN), "keyboard": percent(KBD),
                 "battery": read(BATTERY / "capacity"), "battery_state": read(BATTERY / "status"),
-                "plugged": read(AC / "online") == "1", "power": system_power_w(), "job": self.job_active()}
-        status = run("playerctl", "-p", self.player, "status").stdout.strip()
+                "plugged": read(AC / "online") == "1", "power": system_power_w(self.hwmon), "job": self.job_active()}
+        status = run("playerctl", "-p", self.player, "status").stdout.strip() if self.player else ""
         snap["music"] = status or "Off"
         if status:
             volume = run("playerctl", "-p", self.player, "volume").stdout.strip()
@@ -591,34 +614,34 @@ class Remote:
         for target in ("screen", "keyboard"):
             if s[target]:
                 self.last_level[target] = s[target]
-        name = self.cfg.get("device_name", "M2")
+        name = self.name
         # device_class lock: on = unlocked
         await self.post_state(self.locked_entity, "off" if s["locked"] else "on",
                               friendly_name=f"{name} locked", device_class="lock", icon="mdi:monitor-lock")
-        await self.post_state("binary_sensor.m2_active", "off" if s["locked"] or self.idle.idle else "on",
+        await self.post_state(f"binary_sensor.{self.prefix}_active", "off" if s["locked"] or self.idle.idle else "on",
                               friendly_name=f"{name} in use", device_class="occupancy")
-        await self.post_state("binary_sensor.m2_plugged_in", "on" if s["plugged"] else "off",
+        await self.post_state(f"binary_sensor.{self.prefix}_plugged_in", "on" if s["plugged"] else "off",
                               friendly_name=f"{name} plugged in", device_class="plug")
-        await self.post_state("sensor.m2_battery", s["battery"], friendly_name=f"{name} battery",
+        await self.post_state(f"sensor.{self.prefix}_battery", s["battery"], friendly_name=f"{name} battery",
                               device_class="battery", unit_of_measurement="%", state_class="measurement")
-        await self.post_state("sensor.m2_battery_state", s["battery_state"],
+        await self.post_state(f"sensor.{self.prefix}_battery_state", s["battery_state"],
                               friendly_name=f"{name} battery state", icon="mdi:battery-charging")
-        await self.post_state("sensor.m2_screen_brightness", 0 if self.screen_off else s["screen"],
+        await self.post_state(f"sensor.{self.prefix}_screen_brightness", 0 if self.screen_off else s["screen"],
                               friendly_name=f"{name} screen brightness", unit_of_measurement="%")
-        await self.post_state("sensor.m2_keyboard_brightness", s["keyboard"],
+        await self.post_state(f"sensor.{self.prefix}_keyboard_brightness", s["keyboard"],
                               friendly_name=f"{name} keyboard brightness", unit_of_measurement="%")
-        await self.post_state("sensor.m2_music", s["music"], friendly_name=f"{name} music", icon="mdi:music",
+        await self.post_state(f"sensor.{self.prefix}_music", s["music"], friendly_name=f"{name} music", icon="mdi:music",
                               volume=s.get("volume"), artist=s.get("artist"), title=s.get("title"))
         return s
 
     async def post_smc(self):
-        for label, value in (await asyncio.to_thread(smc)).items():
+        for label, value in (await asyncio.to_thread(smc, self.hwmon)).items():
             key = label.lower().replace("/", "_").replace(" ", "_").removesuffix("_temperature").removesuffix("_temp")
             if label.startswith("Fan"):
-                await self.post_state(f"sensor.m2_{key}", value, friendly_name=f"M2 {label.lower()}",
+                await self.post_state(f"sensor.{self.prefix}_{key}", value, friendly_name=f"{self.name} {label.lower()}",
                                       unit_of_measurement="RPM", icon="mdi:fan", state_class="measurement")
             elif "Temp" in label or "Hotspot" in label:
-                await self.post_state(f"sensor.m2_{key}_temp", round(value / 1000, 1), friendly_name=f"M2 {label}",
+                await self.post_state(f"sensor.{self.prefix}_{key}_temp", round(value / 1000, 1), friendly_name=f"{self.name} {label}",
                                       device_class="temperature", unit_of_measurement="°C", state_class="measurement")
 
     async def ask_approval(self, prompt):
@@ -633,22 +656,22 @@ class Remote:
             self.pending = {"kind": kind, "pid": pid, "nonce": nonce, "prompt": prompt}
         self.last_ask = time.monotonic()
         log.info("asking approval for %s: %s", kind, what)
-        await self.post_state("sensor.m2_request", f"{kind}: {what}"[:255], friendly_name="M2 request",
+        await self.post_state(f"sensor.{self.prefix}_request", f"{kind}: {what}"[:255], friendly_name=f"{self.name} request",
                               icon="mdi:shield-key", kind=kind, code=nonce[:4])
         await self.service("notify", self.notify_service, {
-            "title": "M2 wants a password",
+            "title": f"{self.name} wants a password",
             "message": f"{kind}: {what}\n{time.strftime('%X')}  [{nonce[:4]}]",
-            "data": {"tag": f"m2-{nonce[:8]}", "url": "/m2-laptop/0", "actions": [
-                {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
-                {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
+            "data": {"tag": f"{self.prefix}-{nonce[:8]}", "url": f"/{self.prefix}-remote/0", "actions": [
+                {"action": f"HAREMOTE_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
+                {"action": f"HAREMOTE_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
 
     async def clear_notification(self, nonce):
         await self.service("notify", self.notify_service,
-                           {"message": "clear_notification", "data": {"tag": f"m2-{nonce[:8]}"}})
+                           {"message": "clear_notification", "data": {"tag": f"{self.prefix}-{nonce[:8]}"}})
 
     async def clear_approval(self):
         pending, self.pending = self.pending, None
-        await self.post_state("sensor.m2_request", "none", friendly_name="M2 request", icon="mdi:shield-key")
+        await self.post_state(f"sensor.{self.prefix}_request", "none", friendly_name=f"{self.name} request", icon="mdi:shield-key")
         if pending:
             await self.clear_notification(pending["nonce"])
 
@@ -732,19 +755,19 @@ class Remote:
         pending = self.pending
         if not pending:
             return log.warning("%s pressed with nothing pending", trigger["entity_id"])
-        await self.decide("M2_APPROVE" if trigger["entity_id"] == self.approve_button else "M2_DENY", pending)
+        await self.decide("HAREMOTE_APPROVE" if trigger["entity_id"] == self.approve_button else "HAREMOTE_DENY", pending)
 
     async def decide(self, verb, pending):
         # Suppress re-asking for this prompt while it winds down after the decision.
         self.handled[pending["prompt"][:2]] = time.monotonic()
         await self.clear_approval()
-        handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
+        handler = {"HAREMOTE_APPROVE": self.approve, "HAREMOTE_DENY": self.deny}.get(verb)
         if handler:
             try:
                 await asyncio.wait_for(asyncio.to_thread(handler, pending), 30)
             except Exception as e:
                 log.exception("%s failed", verb)
-                if verb == "M2_APPROVE":
+                if verb == "HAREMOTE_APPROVE":
                     await asyncio.to_thread(password_not_typed, f"{type(e).__name__}: {e}"[:120])
         self.poll_now.set()
 
@@ -759,7 +782,7 @@ class Remote:
                 log.info("%s finished: %s", self.job_unit, result)
                 if self.notify_service:
                     await self.service("notify", self.notify_service,
-                                       {"title": "M2 autobuild", "message": f"Finished: {result}"})
+                                       {"title": f"{self.name} job", "message": f"Finished: {result}"})
             self.job_was_active = active
         if time.monotonic() - self.job_started > 10 or active:
             async with self.session.get(f"{self.url}/api/states/{self.job_entity}") as r:
@@ -797,12 +820,12 @@ class Remote:
                 s = await self.publish()
                 if time.monotonic() - slow > 30:
                     slow = time.monotonic()
-                    await self.post_state("sensor.m2_power", s["power"], friendly_name="M2 power draw",
+                    await self.post_state(f"sensor.{self.prefix}_power", s["power"], friendly_name=f"{self.name} power draw",
                                           device_class="power", unit_of_measurement="W", state_class="measurement")
                     await self.post_smc()
-                    await self.post_state("sensor.m2_last_seen",
+                    await self.post_state(f"sensor.{self.prefix}_last_seen",
                                           datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                                          friendly_name="M2 last seen", device_class="timestamp")
+                                          friendly_name=f"{self.name} last seen", device_class="timestamp")
                 await self.mirror_job(s["job"])
                 await self.unstick()
             except Exception as e:

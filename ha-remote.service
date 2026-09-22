@@ -1,10 +1,10 @@
 [Unit]
 Description=Home Assistant remote control
-After=graphical-session.target gnome-keyring-daemon.service noctalia.service
+After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/ha-remote
+ExecStart=/usr/bin/ha-remote
 Restart=on-failure
 RestartSec=10
 

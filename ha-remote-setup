@@ -1,0 +1,189 @@
+#!/usr/bin/python3
+import asyncio
+import json
+import os
+import re
+import socket
+import subprocess
+import tomllib
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import aiohttp
+
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ha-remote" / "config.toml"
+CFG = tomllib.loads(CONFIG_PATH.read_text())
+HA = CFG["ha"]
+URL = HA["url"].rstrip("/")
+PREFIX = re.sub(r"[^a-z0-9]+", "_", CFG.get("prefix") or socket.gethostname().split(".")[0].lower()).strip("_")
+NAME = CFG.get("device_name", PREFIX.upper())
+TOKEN = subprocess.run(["secret-tool", "lookup", "service", "ha-remote", "key", "token"],
+                       capture_output=True, text=True, check=True).stdout.strip()
+
+TOGGLES = {"lock": ("Lock", "mdi:lock"), "type_password": ("Type password", "mdi:form-textbox-password"),
+           "suspend": ("Suspend", "mdi:power-sleep"), "power_off": ("Power off", "mdi:power"),
+           "next_track": ("Next track", "mdi:skip-next"), "job": ("Job", "mdi:package-variant-closed")}
+BUTTONS = {"approve": ("Approve", "mdi:check-bold"), "deny": ("Deny", "mdi:close-thick")}
+
+
+def e(domain, obj):
+    return f"{domain}.{PREFIX}_{obj}"
+
+
+def call(method, path, body=None):
+    req = urllib.request.Request(URL + path, None if body is None else json.dumps(body).encode(),
+                                 {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+                                 method=method)
+    try:
+        raw = urllib.request.urlopen(req, timeout=30).read()
+        return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as err:
+        return {"type": f"HTTP {err.code}", "errors": err.read().decode()[:300]}
+
+
+def exists(entity_id):
+    return bool(call("GET", f"/api/states/{entity_id}").get("entity_id"))
+
+
+async def ws_send(commands):
+    async with aiohttp.ClientSession() as session, session.ws_connect(f"{URL}/api/websocket") as ws:
+        await ws.receive_json()
+        await ws.send_json({"type": "auth", "access_token": TOKEN})
+        await ws.receive_json()
+        results = []
+        for i, command in enumerate(commands, 1):
+            await ws.send_json({"id": i, **command})
+            results.append(await ws.receive_json())
+        return results
+
+
+def ws(commands):
+    return asyncio.run(ws_send(commands)) if commands else []
+
+
+def flow(handler, *steps):
+    result = call("POST", "/api/config/config_entries/flow", {"handler": handler})
+    for step in steps:
+        result = call("POST", f"/api/config/config_entries/flow/{result['flow_id']}", step)
+    return result
+
+
+def template(kind, obj, data):
+    entity_id = e(kind, obj)
+    if exists(entity_id):
+        return print("exists", entity_id)
+    # HA derives the entity id from the name, so create it prefixed and shorten the name afterwards.
+    result = flow("template", {"next_step_id": kind}, {**data, "name": f"{PREFIX} {obj}"})
+    print(entity_id, result.get("type"), result.get("errors") or "")
+
+
+def event(target, cmd, key=None):
+    data = {"target": target, "cmd": cmd}
+    if key:
+        data[key] = "{{ %s }}" % key
+    return [{"event": "ha_remote_cmd", "event_data": data}]
+
+
+def helpers():
+    create = [{"type": f"input_{kind}/create", "name": f"{PREFIX} {obj}", "icon": icon}
+              for kind, items in (("boolean", TOGGLES), ("button", BUTTONS))
+              for obj, (_, icon) in items.items() if not exists(e(f"input_{kind}", obj))]
+    for command, result in zip(create, ws(create)):
+        print(command["name"], "created" if result.get("success") else result.get("error"))
+
+
+def templates():
+    for target in ("screen", "keyboard"):
+        sensor = e("sensor", f"{target}_brightness")
+        template("light", target, {
+            "state": "{{ states('%s')|float(0) > 0 }}" % sensor,
+            "level": "{{ (states('%s')|float(0) * 2.55)|round }}" % sensor,
+            "turn_on": event(target, "on"), "turn_off": event(target, "off"),
+            "set_level": event(target, "level", "brightness")})
+    template("fan", "music", {
+        "speed_count": 100,
+        "state": "{{ is_state('%s','Playing') }}" % e("sensor", "music"),
+        "percentage": "{{ state_attr('%s','volume')|int(0) }}" % e("sensor", "music"),
+        "turn_on": event("music", "on"), "turn_off": event("music", "off"),
+        "set_percentage": event("music", "level", "percentage")})
+    template("binary_sensor", "online", {
+        "device_class": "connectivity",
+        "state": "{{ as_timestamp(now()) - as_timestamp(states('%s'), 0) < 120 }}" % e("sensor", "last_seen")})
+
+
+def names_and_area():
+    areas = ws([{"type": "config/area_registry/list"}])[0]["result"]
+    area = next((a["area_id"] for a in areas if a["name"] == NAME), None) \
+        or ws([{"type": "config/area_registry/create", "name": NAME, "icon": "mdi:laptop"}])[0]["result"]["area_id"]
+    updates = [{"type": "config/entity_registry/update", "entity_id": e(domain, obj), "name": name, "area_id": area}
+               for domain, items in (("input_boolean", TOGGLES), ("input_button", BUTTONS))
+               for obj, (name, _) in items.items()]
+    updates += [{"type": "config/entity_registry/update", "entity_id": e(domain, obj), "name": name, "area_id": area}
+                for domain, obj, name in (("light", "screen", "Screen"), ("light", "keyboard", "Keyboard"),
+                                          ("fan", "music", "Music"), ("binary_sensor", "online", "Online"))]
+    for command, result in zip(updates, ws(updates)):
+        if not result.get("success"):
+            print(command["entity_id"], result.get("error"))
+
+
+def automations():
+    online = {"condition": "state", "entity_id": e("binary_sensor", "online"), "state": "on"}
+    person = HA.get("person")
+    notify = f"notify.{HA['notify_service']}" if HA.get("notify_service") else None
+    autos = {}
+    if person:
+        autos[f"{PREFIX}_lock_on_leave"] = {
+            "alias": f"{NAME}: lock when I leave home", "mode": "single",
+            "triggers": [{"trigger": "state", "entity_id": person, "from": "home"}],
+            # device_class lock: on = unlocked
+            "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "on"}],
+            "actions": [{"action": "input_boolean.turn_on", "target": {"entity_id": e("input_boolean", "lock")}}]}
+    if person and notify:
+        autos[f"{PREFIX}_locked_reminder_on_arrive"] = {
+            "alias": f"{NAME}: remind me it is locked when I arrive home", "mode": "single",
+            "triggers": [{"trigger": "state", "entity_id": person, "to": "home"}],
+            "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "off"}],
+            "actions": [{"action": notify, "data": {"title": "Welcome home",
+                                                    "message": f"{NAME} is locked. Bump it and approve on your phone."}}]}
+    if HA.get("desk_switch"):
+        autos[f"{PREFIX}_desk_idle_plug_off"] = {
+            "alias": f"{NAME}: desk idle turns off the desk plug", "mode": "restart",
+            "triggers": [{"trigger": "state", "entity_id": e("binary_sensor", "active"), "to": "off", "for": {"minutes": 10}},
+                         {"trigger": "state", "entity_id": e("binary_sensor", "online"), "to": "off", "for": {"minutes": 10}}],
+            "conditions": [{"condition": "state", "entity_id": HA["desk_switch"], "state": "on"}],
+            "actions": [{"action": "switch.turn_off", "target": {"entity_id": HA["desk_switch"]}}]}
+    for key, config in autos.items():
+        print(key, call("POST", f"/api/config/automation/config/{key}", config))
+
+
+def dashboard():
+    path = f"{PREFIX}-remote"
+    if not any(d.get("url_path") == path for d in ws([{"type": "lovelace/dashboards/list"}])[0]["result"]):
+        ws([{"type": "lovelace/dashboards/create", "url_path": path, "title": NAME, "icon": "mdi:laptop",
+             "show_in_sidebar": True, "require_admin": False}])
+    press = lambda entity: {"action": "call-service", "service": "input_button.press", "target": {"entity_id": entity}}
+    view = {"title": NAME, "path": "0", "cards": [
+        {"type": "entities", "title": "Password request", "entities": [{"entity": e("sensor", "request"), "name": "Waiting for"}]},
+        {"type": "horizontal-stack", "cards": [
+            {"type": "button", "entity": e("input_button", "approve"), "name": "Approve", "tap_action": press(e("input_button", "approve"))},
+            {"type": "button", "entity": e("input_button", "deny"), "name": "Deny", "tap_action": press(e("input_button", "deny"))}]},
+        {"type": "entities", "title": "Controls", "entities": [e("input_boolean", o) for o in TOGGLES]
+                                                              + [e("light", "screen"), e("light", "keyboard"), e("fan", "music")]},
+        {"type": "entities", "title": "Status", "entities": [
+            e("binary_sensor", "online"), e("binary_sensor", "locked"), e("binary_sensor", "active"), e("sensor", "battery"),
+            e("sensor", "battery_state"), e("binary_sensor", "plugged_in"), e("sensor", "power"), e("sensor", "music")]}]}
+    print("dashboard", ws([{"type": "lovelace/config/save", "url_path": path, "config": {"views": [view]}}])[0].get("success"))
+
+
+def main():
+    helpers()
+    templates()
+    names_and_area()
+    automations()
+    dashboard()
+    print(f"Done. Expose the input_boolean domain in HA's HomeKit Bridge to get the {NAME} switches in Apple Home.")
+
+
+if __name__ == "__main__":
+    main()

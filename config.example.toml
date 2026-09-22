@@ -1,21 +1,29 @@
-device_name = "M2"
-# Typing is also allowed when the screen is locked or noctalia's polkit panel is open.
-allowed_app_ids = ["foot", "footclient", "spterminal", "org.kde.konsole", "konsole", "Alacritty"]
+# Entity ids are <prefix>_<thing>; prefix defaults to the short hostname.
+# prefix = "laptop"
+device_name = "Laptop"
+# Terminals the password may be typed into (niri app_id). Lock screen and polkit are always allowed.
+allowed_app_ids = ["foot", "footclient", "org.kde.konsole", "Alacritty"]
+# MPRIS player exposed as the "music" fan (empty disables).
 player = "Feishin"
-job_unit = "autobuild-everything.service"
+# systemd user unit driven by the "job" toggle (empty disables).
+job_unit = ""
+# hwmon name for power, temperature and fan sensors.
+hwmon = "macsmc_hwmon"
+# Toggles that only act when pressed from Apple Home (HomeKit Bridge).
 homekit_only = []
+# Push an approve/deny request whenever a sudo or polkit prompt appears.
+notify_prompts = true
 
 [ha]
 url = "https://homeassistant.example.ts.net"
+# notify service for the phone (Settings > Companion app), without the "notify." prefix.
 notify_service = "mobile_app_phone"
-# Secrets live in the keyring:
-#   secret-tool store --label="ha-remote token" service ha-remote key token
-#   secret-tool store --label="ha-remote unlock" service ha-remote key unlock
-# Used by ha-setup only
+# Optional: used by ha-remote-setup for the leave/arrive automations.
 person = "person.me"
-desk_switch = "switch.desk"
-notify_prompts = true
+# Optional: switch turned off after 10 min of desk inactivity.
+# desk_switch = "switch.desk"
 
 # Only notification actions fired by this HA user (the phone app's login) may approve typing.
+# Find it under Settings > People, or in the log of a rejected approval.
 [ha.approver]
 user_id = "<ha user id>"
