@@ -2,6 +2,7 @@
 import asyncio
 import glob
 import json
+import locale
 import logging
 import os
 import secrets
@@ -568,6 +569,8 @@ class Remote:
             # Same prompt keeps its code, so an earlier notification for it stays valid.
             nonce = self.pending["nonce"]
         else:
+            if self.pending:
+                await self.clear_notification(self.pending["nonce"])
             nonce = secrets.token_urlsafe(16)
             self.pending = {"kind": kind, "pid": pid, "nonce": nonce, "prompt": prompt}
         self.last_ask = time.monotonic()
@@ -575,16 +578,21 @@ class Remote:
         await self.post_state("sensor.m2_request", f"{kind}: {what}"[:255], friendly_name="M2 request",
                               icon="mdi:shield-key", kind=kind, code=nonce[:4])
         await self.service("notify", self.notify_service, {
-            "title": "M2 wants a password", "message": f"{kind}: {what}  [{nonce[:4]}]",
-            "data": {"tag": "m2-prompt", "url": "/m2-laptop/0", "actions": [
+            "title": "M2 wants a password",
+            "message": f"{kind}: {what}\n{time.strftime('%X')}  [{nonce[:4]}]",
+            "data": {"tag": f"m2-{nonce[:8]}", "url": "/m2-laptop/0", "actions": [
                 {"action": f"M2_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
                 {"action": f"M2_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
 
-    async def clear_approval(self):
-        self.pending = None
-        await self.post_state("sensor.m2_request", "none", friendly_name="M2 request", icon="mdi:shield-key")
+    async def clear_notification(self, nonce):
         await self.service("notify", self.notify_service,
-                           {"message": "clear_notification", "data": {"tag": "m2-prompt"}})
+                           {"message": "clear_notification", "data": {"tag": f"m2-{nonce[:8]}"}})
+
+    async def clear_approval(self):
+        pending, self.pending = self.pending, None
+        await self.post_state("sensor.m2_request", "none", friendly_name="M2 request", icon="mdi:shield-key")
+        if pending:
+            await self.clear_notification(pending["nonce"])
 
     async def watch_prompts(self, prompt):
         if not self.notify_service:
@@ -740,6 +748,7 @@ class Remote:
 
 
 def main():
+    locale.setlocale(locale.LC_TIME, "")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
