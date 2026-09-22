@@ -3,6 +3,7 @@ device_name = "M2"
 allowed_app_ids = ["foot", "footclient", "spterminal"]
 player = "Feishin"
 job_unit = "autobuild-everything.service"
+homekit_only = ["input_boolean.m2_type_password"]
 
 [ha]
 url = "https://homeassistant.example.ts.net"

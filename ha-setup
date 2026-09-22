@@ -102,20 +102,11 @@ def main():
             "conditions": [online, {"condition": "state", "entity_id": "binary_sensor.m2_locked", "state": "on"}],
             "actions": [{"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.m2_lock"}}]},
         "m2_unlock_prompt_on_arrive": {
-            "alias": "M2: offer unlock when I arrive home", "mode": "single",
+            "alias": "M2: remind me it is locked when I arrive home", "mode": "single",
             "triggers": [{"trigger": "state", "entity_id": person, "to": "home"}],
             "conditions": [online, {"condition": "state", "entity_id": "binary_sensor.m2_locked", "state": "off"}],
             "actions": [{"action": notify, "data": {
-                "title": "Welcome home", "message": "M2 is locked. Unlock it?",
-                "data": {"tag": "m2-unlock", "actions": [
-                    {"action": "M2_UNLOCK", "title": "Unlock M2", "authenticationRequired": True}]}}}]},
-        "m2_unlock_from_notification": {
-            "alias": "M2: unlock from notification", "mode": "single",
-            "triggers": [{"trigger": "event", "event_type": "mobile_app_notification_action",
-                          "event_data": {"action": "M2_UNLOCK"}}],
-            "conditions": [online],
-            "actions": [{"action": "input_boolean.turn_on",
-                         "target": {"entity_id": "input_boolean.m2_type_password"}}]},
+                "title": "Welcome home", "message": "M2 is locked. Unlock it from Apple Home."}}]},
         "m2_desk_idle_plug_off": {
             "alias": "M2: desk idle turns off the desk plug", "mode": "restart",
             "triggers": [{"trigger": "state", "entity_id": "binary_sensor.m2_active", "to": "off", "for": {"minutes": 10}},

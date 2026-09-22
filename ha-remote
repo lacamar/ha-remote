@@ -187,6 +187,8 @@ class Remote:
         self.job_started = 0.0
         self.job_was_active = False
         self.job_cancelled = False
+        self.homekit_only = set(cfg.get("homekit_only", []))
+        self.homekit_press = {}
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
         self.sent = {}
@@ -341,6 +343,14 @@ class Remote:
                 if handler == self.type_password:
                     await asyncio.to_thread(password_not_typed, f"Pressed again within {cooldown} s")
                 return
+            if entity_id in self.homekit_only:
+                # HomeKit fires its event just before the service call; allow a little skew.
+                await asyncio.sleep(1)
+                if time.monotonic() - self.homekit_press.pop(entity_id, -60) > 5:
+                    log.warning("%s refused: not pressed from Apple Home", handler.__name__)
+                    if handler == self.type_password:
+                        await asyncio.to_thread(password_not_typed, "Not pressed from Apple Home")
+                    return
             self.last_run[entity_id] = time.monotonic()
             if reset_first:
                 await self.set_toggle(entity_id, False)
@@ -380,6 +390,7 @@ class Remote:
             await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "ha_remote_cmd"})
             await ws.send_json({"id": 3, "type": "subscribe_trigger",
                                 "trigger": {"platform": "state", "entity_id": self.job_entity, "from": "on", "to": "off"}})
+            await ws.send_json({"id": 4, "type": "subscribe_events", "event_type": "homekit_state_change"})
             # Left on while we were offline: clear without running.
             for entity_id in self.actions:
                 if entity_id != self.job_entity:
@@ -398,6 +409,11 @@ class Remote:
                     continue
                 if data["id"] == 2:
                     queue.put_nowait(data["event"]["data"])
+                    continue
+                if data["id"] == 4:
+                    hk = data["event"]["data"]
+                    if hk.get("service") == "turn_on":
+                        self.homekit_press[hk.get("entity_id")] = time.monotonic()
                     continue
                 if data["id"] == 3:
                     # The agent only turns this off itself once the job is gone, so this is the user.
