@@ -116,6 +116,12 @@ def main():
             "conditions": [online],
             "actions": [{"action": "input_boolean.turn_on",
                          "target": {"entity_id": "input_boolean.m2_type_password"}}]},
+        "m2_desk_idle_plug_off": {
+            "alias": "M2: desk idle turns off the desk plug", "mode": "restart",
+            "triggers": [{"trigger": "state", "entity_id": "binary_sensor.m2_active", "to": "off", "for": {"minutes": 10}},
+                         {"trigger": "state", "entity_id": "binary_sensor.m2_online", "to": "off", "for": {"minutes": 10}}],
+            "conditions": [{"condition": "state", "entity_id": HA.get("desk_switch", "switch.desk"), "state": "on"}],
+            "actions": [{"action": "switch.turn_off", "target": {"entity_id": HA.get("desk_switch", "switch.desk")}}]},
     }
     for key, config in automations.items():
         print(key, call("POST", f"/api/config/automation/config/{key}", config))

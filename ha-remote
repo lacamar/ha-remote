@@ -104,14 +104,21 @@ def kbd_restore():
         run("brightnessctl", "-d", KBD.name, "set", value)
 
 
-def system_power_w():
+def smc():
+    out = {}
     for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
         if read(f"{hwmon}/name") != "macsmc_hwmon":
             continue
-        for label in glob.glob(f"{hwmon}/power*_label"):
-            if read(label) == "Total System Power":
-                return round(int(read(label.replace("_label", "_input"), "0")) / 1e6)
-    return None
+        for label in glob.glob(f"{hwmon}/*_label"):
+            value = read(label.replace("_label", "_input"))
+            if value is not None:
+                out[read(label)] = int(value)
+    return out
+
+
+def system_power_w():
+    value = smc().get("Total System Power")
+    return None if value is None else round(value / 1e6)
 
 
 class Idle(threading.Thread):
@@ -443,6 +450,16 @@ class Remote:
                               volume=s.get("volume"), artist=s.get("artist"), title=s.get("title"))
         return s
 
+    async def post_smc(self):
+        for label, value in (await asyncio.to_thread(smc)).items():
+            key = label.lower().replace("/", "_").replace(" ", "_").removesuffix("_temperature").removesuffix("_temp")
+            if label.startswith("Fan"):
+                await self.post_state(f"sensor.m2_{key}", value, friendly_name=f"M2 {label.lower()}",
+                                      unit_of_measurement="RPM", icon="mdi:fan", state_class="measurement")
+            elif "Temp" in label or "Hotspot" in label:
+                await self.post_state(f"sensor.m2_{key}_temp", round(value / 1000, 1), friendly_name=f"M2 {label}",
+                                      device_class="temperature", unit_of_measurement="°C", state_class="measurement")
+
     async def mirror_job(self, active):
         if active != self.job_was_active and time.monotonic() - self.job_started > 10:
             if self.job_was_active:
@@ -486,6 +503,7 @@ class Remote:
                     slow = time.monotonic()
                     await self.post_state("sensor.m2_power", s["power"], friendly_name="M2 power draw",
                                           device_class="power", unit_of_measurement="W", state_class="measurement")
+                    await self.post_smc()
                     await self.post_state("sensor.m2_last_seen",
                                           datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                           friendly_name="M2 last seen", device_class="timestamp")

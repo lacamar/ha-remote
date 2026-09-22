@@ -12,3 +12,4 @@ notify_service = "mobile_app_phone"
 #   secret-tool store --label="ha-remote unlock" service ha-remote key unlock
 # Used by ha-setup only
 person = "person.me"
+desk_switch = "switch.desk"
