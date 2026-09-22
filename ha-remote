@@ -225,6 +225,7 @@ class Remote:
         self.pending = None
         self.last_ask = -RESEND_AFTER_S
         self.prompt_gone_since = None
+        self.denied = {}
         self.approve_button = ha.get("approve_entity", "input_button.m2_approve")
         self.deny_button = ha.get("deny_entity", "input_button.m2_deny")
         self.approver = ha.get("approver", {})
@@ -561,7 +562,7 @@ class Remote:
 
     async def ask_approval(self, prompt):
         kind, pid, what = prompt
-        if self.pending and self.pending["prompt"] == prompt:
+        if self.pending and self.pending["prompt"][:2] == prompt[:2]:
             # Same prompt keeps its code, so an earlier notification for it stays valid.
             nonce = self.pending["nonce"]
         else:
@@ -588,7 +589,9 @@ class Remote:
             return
         if prompt:
             self.prompt_gone_since = None
-            if (self.pending is None or self.pending["prompt"] != prompt) and self.cfg.get("notify_prompts", True):
+            recently_denied = time.monotonic() - self.denied.get(prompt[:2], -60) < 60
+            if (self.pending is None or self.pending["prompt"][:2] != prompt[:2]) and not recently_denied \
+                    and self.cfg.get("notify_prompts", True):
                 await self.ask_approval(prompt)
         elif self.pending and self.pending["kind"] != "lockscreen":
             self.prompt_gone_since = self.prompt_gone_since or time.monotonic()
@@ -634,6 +637,8 @@ class Remote:
         await self.decide("M2_APPROVE" if trigger["entity_id"] == self.approve_button else "M2_DENY", pending)
 
     async def decide(self, verb, pending):
+        if verb == "M2_DENY":
+            self.denied[pending["prompt"][:2]] = time.monotonic()
         await self.clear_approval()
         handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
         if handler:
