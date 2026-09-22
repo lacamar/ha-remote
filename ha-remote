@@ -499,7 +499,7 @@ class Remote:
     def snapshot_prompt(self, status=None):
         status = status or noctalia_status()
         if status.get("activePanelId") == "polkit":
-            pkexec = run("pgrep", "-x", "pkexec").stdout.split()
+            pkexec = [pid for pid in run("pgrep", "-x", "pkexec").stdout.split() if "zombie" not in read(f"/proc/{pid}/status", "")]
             if pkexec:
                 return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec "))
             return ("polkit", 0, "a system action")
