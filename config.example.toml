@@ -14,3 +14,4 @@ notify_service = "mobile_app_phone"
 # Used by ha-setup only
 person = "person.me"
 desk_switch = "switch.desk"
+notify_prompts = true

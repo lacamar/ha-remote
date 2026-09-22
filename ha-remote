@@ -189,6 +189,7 @@ class Remote:
         self.job_cancelled = False
         self.homekit_only = set(cfg.get("homekit_only", []))
         self.homekit_press = {}
+        self.prompt_seen = False
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
         self.sent = {}
@@ -427,7 +428,8 @@ class Remote:
                     asyncio.create_task(self.call(trigger["entity_id"]))
 
     def snapshot(self):
-        snap = {"locked": noctalia_status().get("locked"), "screen": percent(SCREEN), "keyboard": percent(KBD),
+        status = noctalia_status()
+        snap = {"locked": status.get("locked"), "prompt": status.get("activePanelId") == "polkit" or sudo_prompting(), "screen": percent(SCREEN), "keyboard": percent(KBD),
                 "battery": read(BATTERY / "capacity"), "battery_state": read(BATTERY / "status"),
                 "plugged": read(AC / "online") == "1", "power": system_power_w(), "job": self.job_active()}
         status = run("playerctl", "-p", self.player, "status").stdout.strip()
@@ -476,6 +478,14 @@ class Remote:
                 await self.post_state(f"sensor.m2_{key}_temp", round(value / 1000, 1), friendly_name=f"M2 {label}",
                                       device_class="temperature", unit_of_measurement="°C", state_class="measurement")
 
+    async def watch_prompts(self, prompt):
+        if prompt and not self.prompt_seen and self.notify_service and self.cfg.get("notify_prompts", True):
+            log.info("password prompt appeared")
+            await self.service("notify", self.notify_service,
+                               {"title": "M2 wants a password", "message": "A sudo or polkit prompt is waiting.",
+                                "data": {"tag": "m2-prompt"}})
+        self.prompt_seen = prompt
+
     async def mirror_job(self, active):
         if active != self.job_was_active and time.monotonic() - self.job_started > 10:
             if self.job_was_active:
@@ -523,6 +533,7 @@ class Remote:
                     await self.post_state("sensor.m2_last_seen",
                                           datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                           friendly_name="M2 last seen", device_class="timestamp")
+                await self.watch_prompts(s["prompt"])
                 await self.mirror_job(s["job"])
                 await self.unstick()
             except Exception as e:
