@@ -106,20 +106,66 @@ def stat(pid):
         return 0, -1
 
 
-def focus_window_of(pid):
-    windows = {w.get("pid"): w["id"] for w in json.loads(run("niri", "msg", "--json", "windows").stdout)}
-    _, tty = stat(pid)
+def niri_windows():
+    return json.loads(run("niri", "msg", "--json", "windows").stdout)
+
+
+def tty_path(pid):
+    # /proc/<pid>/fd is unreadable for setuid sudo; the stat tty_nr is not.
+    _, nr = stat(pid)
+    major, minor = (nr >> 8) & 0xFFF, (nr & 0xFF) | ((nr >> 12) & 0xFFF00)
+    return f"/dev/pts/{minor}" if major == 136 else None
+
+
+def probe_window(tty, prefix, suffix, field, windows):
+    # One terminal process may own several windows (footserver, Konsole): tag the
+    # session's tty and see which window shows the tag, then put the old value back.
+    token = f"ha-remote-{secrets.token_hex(4)}"
+    with open(tty, "w") as out:
+        out.write(f"{prefix}{token}{suffix}")
+    wid = None
+    for _ in range(40):
+        wid = next((w["id"] for w in niri_windows() if w.get(field) == token), None)
+        if wid:
+            break
+        time.sleep(0.025)
+    old = next((w.get(field) or "" for w in windows if w["id"] == wid), "")
+    with open(tty, "w") as out:
+        out.write(f"{prefix}{old}{suffix}")
+    return wid
+
+
+def window_of(pid):
+    windows = niri_windows()
+    owners = {}
+    for w in windows:
+        owners.setdefault(w.get("pid"), []).append(w["id"])
+    tty = tty_path(pid)
+    _, tty_nr = stat(pid)
     while pid > 1:
-        if pid in windows:
-            run("niri", "msg", "action", "focus-window", "--id", str(windows[pid]))
-            time.sleep(0.3)
-            return True
+        if pid in owners:
+            ids = owners[pid]
+            if len(ids) == 1:
+                return ids[0]
+            if not tty:
+                return None
+            return (probe_window(tty, "\033]176;", "\033\\", "app_id", windows)
+                    or probe_window(tty, "\033]2;", "\007", "title", windows))
         ppid, ptty = stat(pid)
-        # Only climb through the shell on the same tty; the terminal itself has none.
-        if ptty != tty and ppid not in windows:
-            return False
+        # Only climb through processes on the same tty; the terminal itself has none.
+        if ptty != tty_nr and ppid not in owners:
+            return None
         pid = ppid
-    return False
+    return None
+
+
+def focus_window_of(pid):
+    wid = window_of(pid)
+    if wid is None:
+        return False
+    run("niri", "msg", "action", "focus-window", "--id", str(wid))
+    time.sleep(0.3)
+    return True
 
 
 def kbd_off():

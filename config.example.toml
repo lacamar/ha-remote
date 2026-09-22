@@ -1,6 +1,6 @@
 device_name = "M2"
 # Typing is also allowed when the screen is locked or noctalia's polkit panel is open.
-allowed_app_ids = ["foot", "footclient", "spterminal"]
+allowed_app_ids = ["foot", "footclient", "spterminal", "org.kde.konsole", "konsole", "Alacritty"]
 player = "Feishin"
 job_unit = "autobuild-everything.service"
 homekit_only = []
