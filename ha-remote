@@ -225,7 +225,7 @@ class Remote:
         self.pending = None
         self.last_ask = -RESEND_AFTER_S
         self.prompt_gone_since = None
-        self.denied = {}
+        self.handled = {}
         self.approve_button = ha.get("approve_entity", "input_button.m2_approve")
         self.deny_button = ha.get("deny_entity", "input_button.m2_deny")
         self.approver = ha.get("approver", {})
@@ -500,7 +500,9 @@ class Remote:
         status = status or noctalia_status()
         if status.get("activePanelId") == "polkit":
             pkexec = run("pgrep", "-x", "pkexec").stdout.split()
-            return ("polkit", 0, cmdline(pkexec[0]).removeprefix("pkexec ") if pkexec else "a system action")
+            if pkexec:
+                return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec "))
+            return ("polkit", 0, "a system action")
         sudo_pid = sudo_prompting()
         if sudo_pid:
             return ("sudo", sudo_pid, cmdline(sudo_pid).removeprefix("sudo ") or "sudo")
@@ -589,8 +591,8 @@ class Remote:
             return
         if prompt:
             self.prompt_gone_since = None
-            recently_denied = time.monotonic() - self.denied.get(prompt[:2], -60) < 60
-            if (self.pending is None or self.pending["prompt"][:2] != prompt[:2]) and not recently_denied \
+            handled = time.monotonic() - self.handled.get(prompt[:2], -60) < 60
+            if (self.pending is None or self.pending["prompt"][:2] != prompt[:2]) and not handled \
                     and self.cfg.get("notify_prompts", True):
                 await self.ask_approval(prompt)
         elif self.pending and self.pending["kind"] != "lockscreen":
@@ -637,8 +639,8 @@ class Remote:
         await self.decide("M2_APPROVE" if trigger["entity_id"] == self.approve_button else "M2_DENY", pending)
 
     async def decide(self, verb, pending):
-        if verb == "M2_DENY":
-            self.denied[pending["prompt"][:2]] = time.monotonic()
+        # Suppress re-asking for this prompt while it winds down after the decision.
+        self.handled[pending["prompt"][:2]] = time.monotonic()
         await self.clear_approval()
         handler = {"M2_APPROVE": self.approve, "M2_DENY": self.deny}.get(verb)
         if handler:
