@@ -312,6 +312,7 @@ class Remote:
         self.handled = {}
         self.approver = ha.get("approver", {})
         self.was_locked_now = False
+        self.last_typed = -60
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
         self.sent = {}
@@ -584,6 +585,9 @@ class Remote:
             pkexec = [pid for pid in run("pgrep", "-x", "pkexec").stdout.split() if "zombie" not in read(f"/proc/{pid}/status", "")]
             if pkexec:
                 return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec ")[:120])
+            # The panel lingers briefly after pkexec exits; do not mistake that for a new request.
+            if time.monotonic() - self.last_typed < 5:
+                return None
             return ("polkit", 0, "a system action")
         sudo_pid = sudo_prompting()
         if sudo_pid:
@@ -720,6 +724,7 @@ class Remote:
         self.type_secret()
 
     def type_secret(self):
+        self.last_typed = time.monotonic()
         # Via stdin so the password never appears in argv (/proc/*/cmdline).
         subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
         run("wtype", "-k", "Return")
