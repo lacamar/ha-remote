@@ -20,8 +20,8 @@ url = "https://homeassistant.example.ts.net"
 notify_service = "mobile_app_phone"
 # Optional: used by ha-remote-setup for the leave/arrive automations.
 person = "person.me"
-# Optional: switch turned off after 10 min of desk inactivity.
-# desk_switch = "switch.desk"
+# Optional: switch turned off once you have been away from home for 10 min.
+# desk_switch = "switch.desk"   # turned off 10 min after you leave home
 
 # Only notification actions fired by this HA user (the phone app's login) may approve typing.
 # Find it under Settings > People, or in the log of a rejected approval.

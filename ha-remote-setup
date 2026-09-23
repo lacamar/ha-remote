@@ -146,11 +146,10 @@ def automations():
             "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "off"}],
             "actions": [{"action": notify, "data": {"title": "Welcome home",
                                                     "message": f"{NAME} is locked. Bump it and approve on your phone."}}]}
-    if HA.get("desk_switch"):
-        autos[f"{PREFIX}_desk_idle_plug_off"] = {
-            "alias": f"{NAME}: desk idle turns off the desk plug", "mode": "restart",
-            "triggers": [{"trigger": "state", "entity_id": e("binary_sensor", "active"), "to": "off", "for": {"minutes": 10}},
-                         {"trigger": "state", "entity_id": e("binary_sensor", "online"), "to": "off", "for": {"minutes": 10}}],
+    if person and HA.get("desk_switch"):
+        autos[f"{PREFIX}_desk_plug_off_when_away"] = {
+            "alias": f"{NAME}: desk plug off when I am away", "mode": "single",
+            "triggers": [{"trigger": "state", "entity_id": person, "from": "home", "for": {"minutes": 10}}],
             "conditions": [{"condition": "state", "entity_id": HA["desk_switch"], "state": "on"}],
             "actions": [{"action": "switch.turn_off", "target": {"entity_id": HA["desk_switch"]}}]}
     for key, config in autos.items():
