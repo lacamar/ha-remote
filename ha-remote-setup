@@ -139,19 +139,6 @@ def automations():
             # device_class lock: on = unlocked
             "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "on"}],
             "actions": [{"action": "input_boolean.turn_on", "target": {"entity_id": e("input_boolean", "lock")}}]}
-    if person and notify:
-        autos[f"{PREFIX}_locked_reminder_on_arrive"] = {
-            "alias": f"{NAME}: remind me it is locked when I arrive home", "mode": "single",
-            "triggers": [{"trigger": "state", "entity_id": person, "to": "home"}],
-            "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "off"}],
-            "actions": [{"action": notify, "data": {"title": "Welcome home",
-                                                    "message": f"{NAME} is locked. Bump it and approve on your phone."}}]}
-    if person and HA.get("desk_switch"):
-        autos[f"{PREFIX}_desk_plug_off_when_away"] = {
-            "alias": f"{NAME}: desk plug off when I am away", "mode": "single",
-            "triggers": [{"trigger": "state", "entity_id": person, "from": "home", "for": {"minutes": 10}}],
-            "conditions": [{"condition": "state", "entity_id": HA["desk_switch"], "state": "on"}],
-            "actions": [{"action": "switch.turn_off", "target": {"entity_id": HA["desk_switch"]}}]}
     for key, config in autos.items():
         print(key, call("POST", f"/api/config/automation/config/{key}", config))
 
