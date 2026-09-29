@@ -2,7 +2,7 @@
 
 Name:     ha-remote
 Version:  %{tag}
-Release:  1%{?dist}
+Release:  2%{?dist}
 Summary:  Control a niri laptop from Home Assistant and Apple Home
 
 License:  MIT
@@ -15,6 +15,7 @@ BuildRequires: python3-pywayland
 BuildRequires: wayland-devel
 BuildRequires: wayland-protocols-devel
 BuildRequires: systemd-rpm-macros
+%{?systemd_ordering}
 
 Requires: python3-aiohttp
 Requires: python3-pywayland
@@ -52,6 +53,9 @@ cp -r protocols %{buildroot}%{_datadir}/%{name}/
 %preun
 %systemd_user_preun %{name}.service
 
+%postun
+%systemd_user_postun_with_restart %{name}.service
+
 %files
 %license LICENSE
 %doc README.md
@@ -61,6 +65,10 @@ cp -r protocols %{buildroot}%{_datadir}/%{name}/
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.3-2
+- Restart user service on upgrade
+- Add systemd ordering
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.3-1
 - Clear password field before typing
 - Desk plug automation keyed on presence
