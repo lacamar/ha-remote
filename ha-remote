@@ -364,7 +364,7 @@ class Remote:
         else:
             return password_not_typed(f"Focused window {app_id or 'none'} is not an allowed terminal")
         log.info("typing password into %s", target)
-        self.type_secret()
+        self.type_secret(tty=target not in ("lockscreen", "polkit"))
 
     def request_password(self):
         if noctalia_status().get("locked"):
@@ -721,10 +721,14 @@ class Remote:
             if pid not in sudo_prompts():
                 return password_not_typed("That sudo prompt is gone")
         log.info("typing password into %s", kind)
-        self.type_secret()
+        self.type_secret(tty=kind == "sudo")
 
-    def type_secret(self):
+    def type_secret(self, tty):
         self.last_typed = time.monotonic()
+        if tty:
+            run("wtype", "-M", "ctrl", "u", "-m", "ctrl")
+        else:
+            run("wtype", "-M", "ctrl", "a", "-m", "ctrl", "-k", "BackSpace")
         # Via stdin so the password never appears in argv (/proc/*/cmdline).
         subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
         run("wtype", "-k", "Return")

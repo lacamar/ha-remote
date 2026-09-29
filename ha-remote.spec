@@ -1,4 +1,4 @@
-%global tag 0.1.2
+%global tag 0.1.3
 
 Name:     ha-remote
 Version:  %{tag}
@@ -61,6 +61,11 @@ cp -r protocols %{buildroot}%{_datadir}/%{name}/
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.3-1
+- Clear password field before typing
+- Desk plug automation keyed on presence
+- Drop arrive reminder and desk plug automations from setup
+
 * Tue Sep 22 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.2-1
 - Tidier notification text
 
