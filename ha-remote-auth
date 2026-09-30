@@ -38,7 +38,9 @@ def pam_lines(service):
     # The lock screen only runs PAM after a submit, so there is nothing to start early.
     if service == "login":
         return [finish]
-    return [f"auth       optional     pam_exec.so quiet seteuid stdout {HELPER} start\n", finish]
+    # noctalia's polkit panel does not make room for an info line.
+    options = "seteuid stdout" if service.startswith("sudo") else "seteuid"
+    return [f"auth       optional     pam_exec.so quiet {options} {HELPER} start\n", finish]
 
 
 def enable():

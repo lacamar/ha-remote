@@ -1,4 +1,4 @@
-%global tag 0.2.2
+%global tag 0.2.3
 
 Name:     ha-remote
 Version:  %{tag}
@@ -86,6 +86,9 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.3-1
+- No info line in the polkit panel
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.2-1
 - Phone approval alongside the open password prompt
 - Empty lock screen submit asks the phone
