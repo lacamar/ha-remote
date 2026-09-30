@@ -397,20 +397,37 @@ class Remote:
                     if hk.get("service") in ("turn_on", "press"):
                         self.homekit_press[hk.get("entity_id")] = time.monotonic()
 
+    def polkit_panel(self, submit):
+        if noctalia_status().get("activePanelId") != "polkit":
+            return
+        if submit:
+            # The panel ignores an empty submit; the approval is what authenticates, not this text.
+            run("wtype", "x", "-k", "Return")
+        else:
+            run("noctalia", "msg", "panel-close", "polkit")
+
+    async def auth_send(self, writer):
+        while True:
+            writer.write(json.dumps(await self.to_auth.get()).encode() + b"\n")
+            await writer.drain()
+
     async def auth_link(self):
         while True:
             try:
-                _, writer = await asyncio.open_unix_connection(AUTH_SOCKET)
+                reader, writer = await asyncio.open_unix_connection(AUTH_SOCKET)
                 while not self.to_auth.empty():
                     self.to_auth.get_nowait()
                 self.to_auth.put_nowait({"type": "presence", "active": self.active})
+                sender = asyncio.create_task(self.auth_send(writer))
                 try:
-                    while True:
-                        writer.write(json.dumps(await self.to_auth.get()).encode() + b"\n")
-                        await writer.drain()
+                    async for line in reader:
+                        msg = json.loads(line)
+                        if msg.get("type") == "polkit":
+                            asyncio.create_task(asyncio.to_thread(self.polkit_panel, bool(msg.get("submit"))))
                 finally:
+                    sender.cancel()
                     writer.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
             await asyncio.sleep(10)
 

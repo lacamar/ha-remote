@@ -35,12 +35,12 @@ Or from a checkout: copy `ha-remote`, `ha-remote-setup` and `haremote.py` to you
     sudo ha-remote-auth enable
 
 `enable` puts `pam_exec` in front of the password for `sudo`, `sudo-i`, `polkit-1` and `login`
-(`disable` undoes it). A sudo or polkit prompt pushes Approve and Deny to the phone; approving
-authenticates without a password. Touching the keyboard or mouse drops the request and shows the
-password prompt, as do a timeout and Deny. ssh sessions and other users are never approved.
+(`disable` undoes it). A sudo or polkit prompt pushes Approve and Deny to the phone while the
+password prompt stays open: approving submits the prompt for you, typing the password cancels the
+request. ssh sessions and other users are never approved.
 
-For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. The
-Unlock button submits the empty lock screen, which then waits for the phone.
+For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. Submitting
+it empty, or the Unlock button, waits for the phone; a typed password unlocks as usual.
 
 The root service holds its own token and checks that every tap came from the approver's HA user
 with a one-time code. The token must not belong to the approver, or anything holding it could

@@ -1,4 +1,4 @@
-%global tag 0.2.1
+%global tag 0.2.2
 
 Name:     ha-remote
 Version:  %{tag}
@@ -57,6 +57,9 @@ cp -r protocols %{buildroot}%{_datadir}/%{name}/
 %post
 %systemd_user_post %{name}.service
 %systemd_post %{name}-auth.service
+if [ $1 -gt 1 ] && grep -qs %{_libexecdir}/%{name}/pam-helper %{_sysconfdir}/pam.d/*; then
+    %{_bindir}/ha-remote-auth enable >/dev/null || :
+fi
 
 %preun
 %systemd_user_preun %{name}.service
@@ -83,6 +86,11 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.2-1
+- Phone approval alongside the open password prompt
+- Empty lock screen submit asks the phone
+- Refresh PAM lines on upgrade
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.1-1
 - Phone first for sudo and polkit, input cancels
 

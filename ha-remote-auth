@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -I
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import signal
 import socket
 import struct
 import sys
+import termios
 import time
 import tomllib
 from pathlib import Path
@@ -19,9 +21,8 @@ log = logging.getLogger("ha-remote-auth")
 
 CONFIG_PATH = Path("/etc/ha-remote/auth.toml")
 SOCKET = Path("/run/ha-remote/auth.sock")
-PAM_LINE = "auth       sufficient   pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper"
+HELPER = "/usr/libexec/ha-remote/pam-helper"
 PAM_SERVICES = ("sudo", "sudo-i", "polkit-1", "login")
-PRESENT_FOR_S = 30
 HOLD_MAX_S = 60
 
 
@@ -32,22 +33,33 @@ def pam_files():
             yield path, vendor
 
 
+def pam_lines(service):
+    finish = f"auth       sufficient   pam_exec.so quiet seteuid expose_authtok {HELPER} finish\n"
+    # The lock screen only runs PAM after a submit, so there is nothing to start early.
+    if service == "login":
+        return [finish]
+    return [f"auth       optional     pam_exec.so quiet seteuid stdout {HELPER} start\n", finish]
+
+
 def enable():
     for path, vendor in pam_files():
         lines = (path if path.exists() else vendor).read_text().splitlines(keepends=True)
-        if PAM_LINE + "\n" in lines:
+        wanted = pam_lines(path.name)
+        at = next((i for i, l in enumerate(lines) if l.split()[:1] == ["auth"]), len(lines))
+        if lines[at:at + len(wanted)] == wanted:
             continue
-        at = next((i for i, line in enumerate(lines) if line.split()[:1] == ["auth"]), len(lines))
-        lines.insert(at, PAM_LINE + "\n")
+        lines = [l for l in lines if HELPER not in l]
+        at = next((i for i, l in enumerate(lines) if l.split()[:1] == ["auth"]), len(lines))
+        lines[at:at] = wanted
         path.write_text("".join(lines))
         print("enabled", path)
 
 
 def disable():
     for path, vendor in pam_files():
-        if not path.exists() or PAM_LINE not in (text := path.read_text()):
+        if not path.exists() or HELPER not in (text := path.read_text()):
             continue
-        text = text.replace(PAM_LINE + "\n", "")
+        text = "".join(l for l in text.splitlines(keepends=True) if HELPER not in l)
         if vendor.exists() and text == vendor.read_text():
             path.unlink()
         else:
@@ -58,15 +70,16 @@ def disable():
 def proc_stat(pid):
     try:
         head, rest = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)
-        return head.split("(", 1)[1], int(rest.split()[1])
+        fields = rest.split()
+        return head.split("(", 1)[1], int(fields[1]), int(fields[4])
     except (OSError, IndexError, ValueError):
-        return None, 0
+        return None, 0, 0
 
 
 def ancestors(pid):
     chain = []
     while pid > 1:
-        comm, ppid = proc_stat(pid)
+        comm, ppid, _ = proc_stat(pid)
         if comm is None:
             break
         chain.append((pid, comm))
@@ -86,6 +99,29 @@ def pkexec_command():
     return next((a for pid in pids if proc_stat(pid)[0] == "pkexec" and (a := args(pid))), None)
 
 
+def tty_of(pid):
+    nr = proc_stat(pid)[2]
+    major, minor = (nr >> 8) & 0xFFF, (nr & 0xFF) | ((nr >> 12) & 0xFFF00)
+    return f"/dev/pts/{minor}" if major == 136 else None
+
+
+def press_enter(tty):
+    fd = os.open(tty, os.O_RDWR | os.O_NOCTTY)
+    try:
+        fcntl.ioctl(fd, termios.TIOCSTI, b"\n")
+    finally:
+        os.close(fd)
+
+
+class Request:
+    def __init__(self, kind, what, app):
+        self.kind, self.what, self.app = kind, what, app
+        self.tty = tty_of(app) if kind == "sudo" else None
+        self.nonce = secrets.token_hex(16)
+        self.verdict = asyncio.get_running_loop().create_future()
+        self.blocking = False
+
+
 class Auth:
     def __init__(self, cfg):
         self.url = cfg["url"].rstrip("/")
@@ -95,30 +131,27 @@ class Auth:
         self.user = pwd.getpwnam(cfg["user"])
         self.name = cfg.get("device_name", socket.gethostname().split(".")[0])
         self.timeout = cfg.get("timeout_s", 60)
-        self.active, self.active_at, self.hold_until = True, 0.0, 0.0
-        self.waiting = {}
+        self.hold_until = 0.0
+        self.requests = {}
+        self.agent = None
         self.connected = False
         self.session = None
-
-    def present(self):
-        now = time.monotonic()
-        return now >= self.hold_until and (self.active or now - self.active_at < PRESENT_FOR_S)
 
     def describe(self, pid, uid, req):
         if req.get("user") != self.user.pw_name or req.get("rhost"):
             return None
         chain = ancestors(pid)
         comms = [comm for _, comm in chain]
-        if any(comm.startswith("sshd") for comm in comms):
+        if len(chain) < 2 or any(comm.startswith("sshd") for comm in comms):
             return None
+        app, app_comm = chain[1]
         service = req.get("service")
-        if uid == 0 and service in ("sudo", "sudo-i"):
-            sudo = next((p for p, comm in chain if comm == "sudo"), None)
-            return sudo and ("sudo", (args(sudo) or "a shell")[:120], sudo)
+        if uid == 0 and service in ("sudo", "sudo-i") and app_comm == "sudo":
+            return "sudo", (args(app) or "a shell")[:120], app
         if uid == 0 and service == "polkit-1":
-            return "polkit", (pkexec_command() or "a system action")[:120], None
+            return "polkit", (pkexec_command() or "a system action")[:120], app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
-            return "lockscreen", "unlock the screen", None
+            return "lockscreen", "unlock the screen", app
         return None
 
     async def service(self, domain, name, data):
@@ -126,87 +159,145 @@ class Auth:
                                      timeout=aiohttp.ClientTimeout(total=10)) as r:
             r.raise_for_status()
 
-    async def authorize(self, pid, uid, req, reader, writer):
-        prompt = self.describe(pid, uid, req)
-        if not prompt or not self.connected:
-            return False
-        kind, what, sudo_pid = prompt
-        # Someone just typed the password into the lock screen.
-        if kind == "lockscreen" and self.present():
-            return False
-        writer.write(b'{"asking": true}\n')
-        await writer.drain()
-        nonce = secrets.token_hex(16)
-        verdict = asyncio.get_running_loop().create_future()
-        self.waiting[nonce] = verdict
-        tag = f"ha-remote-{nonce[:8]}"
-        gone = asyncio.ensure_future(reader.read(1))
+    def tag(self, request):
+        return f"ha-remote-{request.nonce[:8]}"
+
+    async def ask(self, kind, what, app):
+        request = self.requests[app] = Request(kind, what, app)
         log.info("asking approval for %s: %s", kind, what)
         try:
             await self.service("notify", self.notify_service, {
-                "title": f"{self.name}: {kind}", "message": what, "data": {"tag": tag, "actions": [
-                    {"action": f"HAREMOTE_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
-                    {"action": f"HAREMOTE_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
-            await asyncio.wait({verdict, gone}, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED)
+                "title": f"{self.name}: {kind}", "message": what, "data": {"tag": self.tag(request), "actions": [
+                    {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
+                    {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.warning("notify failed: %s", e)
-        finally:
-            gone.cancel()
-            del self.waiting[nonce]
-            try:
-                await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": tag}})
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                pass
-        decided = verdict.done() and not verdict.cancelled()
-        approved = decided and verdict.result()
-        log.info("%s %s", kind, "approved" if approved else "denied" if decided else "not approved")
-        if decided and not approved and sudo_pid:
-            os.kill(sudo_pid, signal.SIGINT)
-        return approved
+            await self.drop(request)
+            return None
+        asyncio.create_task(self.expire(request))
+        return request
+
+    async def drop(self, request):
+        if self.requests.get(request.app) is not request:
+            return
+        del self.requests[request.app]
+        if not request.verdict.done():
+            request.verdict.cancel()
+        try:
+            await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": self.tag(request)}})
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
+    async def expire(self, request):
+        deadline = time.monotonic() + self.timeout
+        while self.requests.get(request.app) is request and time.monotonic() < deadline:
+            if proc_stat(request.app)[0] is None:
+                break
+            await asyncio.sleep(1)
+        await self.drop(request)
+
+    def approved(self, request):
+        return request.verdict.done() and not request.verdict.cancelled() and request.verdict.result()
+
+    async def start(self, pid, uid, req, writer):
+        prompt = self.describe(pid, uid, req)
+        if not prompt or not self.connected:
+            return False
+        kind, what, app = prompt
+        if app not in self.requests and not await self.ask(kind, what, app):
+            return False
+        writer.write(b'{"asking": true}\n')
+        return True
+
+    async def finish(self, pid, uid, req, reader, writer):
+        prompt = self.describe(pid, uid, req)
+        if not prompt:
+            return False
+        kind, what, app = prompt
+        request = self.requests.get(app)
+        if request and (self.approved(request) or req.get("typed")):
+            await self.drop(request)
+            return self.approved(request)
+        if req.get("typed") or not self.connected:
+            return False
+        # Submitted empty: wait here for the phone.
+        if not request:
+            if not (request := await self.ask(kind, what, app)):
+                return False
+            writer.write(b'{"asking": true}\n')
+            await writer.drain()
+        request.blocking = True
+        gone = asyncio.ensure_future(reader.read(1))
+        await asyncio.wait({request.verdict, gone}, return_when=asyncio.FIRST_COMPLETED)
+        gone.cancel()
+        await self.drop(request)
+        self.log_verdict(request)
+        return self.approved(request)
+
+    def log_verdict(self, request):
+        decided = request.verdict.done() and not request.verdict.cancelled()
+        log.info("%s %s", request.kind, ("approved" if request.verdict.result() else "denied") if decided else "not approved")
+
+    def submit(self, request):
+        # Answer the open password prompt; finish sees the verdict.
+        self.log_verdict(request)
+        if request.blocking or proc_stat(request.app)[0] is None:
+            return
+        approved = self.approved(request)
+        if request.kind == "sudo":
+            if approved and request.tty:
+                press_enter(request.tty)
+            elif not approved:
+                os.kill(request.app, signal.SIGINT)
+        elif request.kind == "polkit" and self.agent:
+            self.agent.write(json.dumps({"type": "polkit", "submit": approved}).encode() + b"\n")
 
     def abandon(self):
-        for verdict in self.waiting.values():
-            verdict.cancel()
+        for request in self.requests.values():
+            if request.blocking and not request.verdict.done():
+                request.verdict.cancel()
 
     async def handle(self, reader, writer):
         pid, uid, _ = struct.unpack("3i", writer.get_extra_info("socket").getsockopt(
             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
         owner = uid == self.user.pw_uid
-        presence = False
         try:
             if uid != 0 and not owner:
                 return
             async for line in reader:
                 req = json.loads(line)
                 if req.get("type") == "presence" and owner:
-                    presence = True
-                    self.active, self.active_at = bool(req.get("active")), time.monotonic()
-                    if self.active and time.monotonic() >= self.hold_until:
-                        # Input at the laptop: drop phone requests so the password prompt shows.
+                    self.agent = writer
+                    if req.get("active") and time.monotonic() >= self.hold_until:
+                        # Input at the laptop: drop a blocking phone wait so the password prompt returns.
                         self.abandon()
                 elif req.get("type") == "hold" and owner:
                     self.hold_until = time.monotonic() + min(float(req.get("s", 0)), HOLD_MAX_S)
                 elif req.get("type") == "auth":
-                    ok = await self.authorize(pid, uid, req, reader, writer)
+                    if req.get("stage") == "start":
+                        ok = await self.start(pid, uid, req, writer)
+                    else:
+                        ok = await self.finish(pid, uid, req, reader, writer)
                     writer.write(json.dumps({"ok": ok}).encode() + b"\n")
                     await writer.drain()
                     return
         except (ValueError, OSError) as e:
             log.warning("client %s: %s", pid, e)
         finally:
-            if presence:
-                self.active = True
+            if self.agent is writer:
+                self.agent = None
             writer.close()
 
     def on_action(self, event):
         verb, _, nonce = event["data"].get("action", "").rpartition("_")
-        verdict = self.waiting.get(nonce)
-        if verdict is None or verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY"):
+        request = next((r for r in self.requests.values() if secrets.compare_digest(r.nonce, nonce)), None)
+        if request is None or request.verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY"):
             return
         user_id = (event.get("context") or {}).get("user_id")
         if user_id != self.approver:
             return log.warning("ignoring %s from user %s", verb, user_id)
-        verdict.set_result(verb == "HAREMOTE_APPROVE")
+        request.verdict.set_result(verb == "HAREMOTE_APPROVE")
+        self.submit(request)
 
     async def listen(self):
         async with self.session.ws_connect(f"{self.url}/api/websocket", heartbeat=30) as ws:

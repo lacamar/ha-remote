@@ -4,16 +4,21 @@ import os
 import socket
 import sys
 
+stage = sys.argv[1] if len(sys.argv) > 1 else "finish"
+typed = stage == "finish" and bool(sys.stdin.read().strip("\0\n"))
+if typed and os.environ.get("PAM_SERVICE") == "login":
+    sys.exit(1)
 try:
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(300)
         s.connect("/run/ha-remote/auth.sock")
-        s.sendall(json.dumps({"type": "auth", "service": os.environ.get("PAM_SERVICE"), "user": os.environ.get("PAM_USER"),
-                              "rhost": os.environ.get("PAM_RHOST", "")}).encode() + b"\n")
+        s.sendall(json.dumps({"type": "auth", "stage": stage, "typed": typed, "service": os.environ.get("PAM_SERVICE"),
+                              "user": os.environ.get("PAM_USER"), "rhost": os.environ.get("PAM_RHOST", "")}).encode() + b"\n")
         for line in s.makefile():
             reply = json.loads(line)
             if reply.get("asking"):
-                print("Approve on your phone, or wait for the password prompt.", flush=True)
+                print("Approve on your phone, or enter the password." if stage == "start"
+                      else "Approve on your phone.", flush=True)
             elif "ok" in reply:
                 sys.exit(0 if reply["ok"] else 1)
 except (OSError, ValueError):
