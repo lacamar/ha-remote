@@ -1,0 +1,18 @@
+[Unit]
+Description=Home Assistant approval for sudo, polkit and the lock screen
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ha-remote-auth
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=ha-remote
+RuntimeDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

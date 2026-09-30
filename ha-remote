@@ -5,38 +5,28 @@ import json
 import locale
 import logging
 import os
-import re
-import secrets
-import signal
-import socket
 import subprocess
 import sys
 import threading
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
 
+from haremote import AUTH_SOCKET, load_config, prefix, secret
+
 log = logging.getLogger("ha-remote")
 
 HOME = Path.home()
-CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ha-remote" / "config.toml"
 PROTOCOL_DIRS = [Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "ha-remote" / "protocols",
                  Path("/usr/share/ha-remote/protocols")]
 KBD_SAVE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ha-remote-kbd"
-SECRET_SERVICE = "ha-remote"
 COOLDOWN_S = 5
-STUCK_AFTER_S = 30
 CONFIRM_WINDOW_S = 20
 IDLE_AFTER_MS = 120_000
-PROMPT_POLL_S = 1
-RESEND_AFTER_S = 10
-PROMPT_GONE_S = 3
-LOCKSCREEN_EXPIRE_S = 60
+UNLOCK_HOLD_S = 20
 EPOCH = "1970-01-01T00:00:00+00:00"
-
 
 
 def first(pattern, where=lambda p: True):
@@ -47,14 +37,6 @@ SCREEN = first("/sys/class/backlight/*")
 KBD = first("/sys/class/leds/*kbd_backlight*")
 BATTERY = first("/sys/class/power_supply/*", lambda p: Path(p, "type").read_text().strip() == "Battery")
 AC = first("/sys/class/power_supply/*", lambda p: Path(p, "type").read_text().strip() == "Mains")
-
-
-def secret(key):
-    proc = subprocess.run(["secret-tool", "lookup", "service", SECRET_SERVICE, "key", key],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise SystemExit(f"secret missing: secret-tool store --label='ha-remote {key}' service {SECRET_SERVICE} key {key}")
-    return proc.stdout.rstrip("\n")
 
 
 def run(*cmd):
@@ -80,117 +62,8 @@ def set_percent(device, pct):
         run("brightnessctl", "-d", device.name, "set", f"{max(0, min(100, pct))}%")
 
 
-def password_not_typed(reason):
-    log.warning("type_password: %s", reason)
-    run("notify-send", "-e", "-u", "low", "-a", "ha-remote", "Password not typed", reason)
-
-
 def noctalia_status():
     return json.loads(run("noctalia", "msg", "status").stdout)
-
-
-def focused_app_id():
-    out = run("niri", "msg", "--json", "focused-window").stdout.strip()
-    window = json.loads(out) if out else None
-    return window.get("app_id") if window else None
-
-
-def cmdline(pid):
-    return read(f"/proc/{pid}/cmdline", "").replace("\0", " ").strip()
-
-
-def sudo_prompts():
-    # Before authentication sudo has not forked the command yet.
-    waiting = []
-    for pid in run("pgrep", "-x", "sudo").stdout.split():
-        try:
-            if not Path(f"/proc/{pid}/task/{pid}/children").read_text().strip():
-                waiting.append(int(pid))
-        except OSError:
-            pass
-    return waiting
-
-
-def sudo_prompting():
-    return next(iter(sudo_prompts()), None)
-
-
-def stat(pid):
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        return int(fields[1]), int(fields[4])
-    except (OSError, IndexError, ValueError):
-        return 0, -1
-
-
-def niri_windows():
-    return json.loads(run("niri", "msg", "--json", "windows").stdout)
-
-
-def tty_path(pid):
-    # /proc/<pid>/fd is unreadable for setuid sudo; the stat tty_nr is not.
-    _, nr = stat(pid)
-    major, minor = (nr >> 8) & 0xFFF, (nr & 0xFF) | ((nr >> 12) & 0xFFF00)
-    return f"/dev/pts/{minor}" if major == 136 else None
-
-
-def probe_window(tty, prefix, suffix, field, windows):
-    # One terminal process may own several windows (footserver, Konsole): tag the
-    # session's tty and see which window shows the tag, then put the old value back.
-    token = f"ha-remote-{secrets.token_hex(4)}"
-    with open(tty, "w") as out:
-        out.write(f"{prefix}{token}{suffix}")
-    wid = None
-    for _ in range(40):
-        wid = next((w["id"] for w in niri_windows() if w.get(field) == token), None)
-        if wid:
-            break
-        time.sleep(0.025)
-    old = next((w.get(field) or "" for w in windows if w["id"] == wid), "")
-    with open(tty, "w") as out:
-        out.write(f"{prefix}{old}{suffix}")
-    return wid
-
-
-def window_of(pid):
-    windows = niri_windows()
-    owners = {}
-    for w in windows:
-        owners.setdefault(w.get("pid"), []).append(w["id"])
-    tty = tty_path(pid)
-    _, tty_nr = stat(pid)
-    while pid > 1:
-        if pid in owners:
-            ids = owners[pid]
-            if len(ids) == 1:
-                return ids[0]
-            if not tty:
-                return None
-            return (probe_window(tty, "\033]176;", "\033\\", "app_id", windows)
-                    or probe_window(tty, "\033]2;", "\007", "title", windows))
-        ppid, ptty = stat(pid)
-        # Only climb through processes on the same tty; the terminal itself has none.
-        if ptty != tty_nr and ppid not in owners:
-            return None
-        pid = ppid
-    return None
-
-
-def focused_window_id():
-    out = run("niri", "msg", "--json", "focused-window").stdout.strip()
-    return json.loads(out).get("id") if out and out != "null" else None
-
-
-def focus_window_of(pid):
-    wid = window_of(pid)
-    if wid is None:
-        return False
-    run("niri", "msg", "action", "focus-window", "--id", str(wid))
-    for _ in range(10):
-        time.sleep(0.05)
-        if focused_window_id() == wid:
-            return True
-    return False
 
 
 def kbd_off():
@@ -204,14 +77,14 @@ def kbd_off():
 
 def kbd_restore():
     value = read(KBD_SAVE)
-    if value is None:
+    if value is None or KBD is None:
         return
     KBD_SAVE.unlink(missing_ok=True)
     if value.isdigit():
         run("brightnessctl", "-d", KBD.name, "set", value)
 
 
-def smc(name="macsmc_hwmon"):
+def smc(name):
     out = {}
     for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
         if read(f"{hwmon}/name") != name:
@@ -223,16 +96,16 @@ def smc(name="macsmc_hwmon"):
     return out
 
 
-def system_power_w(name="macsmc_hwmon"):
+def system_power_w(name):
     value = smc(name).get("Total System Power")
     return None if value is None else round(value / 1e6)
 
 
 class Idle(threading.Thread):
-    def __init__(self, on_activity):
+    def __init__(self, on_input):
         super().__init__(daemon=True)
         self.idle = False
-        self.on_activity = on_activity
+        self.on_input = on_input
 
     def run(self):
         try:
@@ -259,15 +132,12 @@ class Idle(threading.Thread):
             away.dispatcher["idled"] = lambda *_: setattr(self, "idle", True)
             away.dispatcher["resumed"] = lambda *_: setattr(self, "idle", False)
             touch = make(1000, seat)
-            touch.dispatcher["resumed"] = lambda *_: self.on_activity()
+            touch.dispatcher["idled"] = lambda *_: self.on_input(False)
+            touch.dispatcher["resumed"] = lambda *_: self.on_input(True)
             while display.dispatch(block=True) != -1:
                 pass
         except Exception:
             log.exception("idle watcher stopped")
-
-
-def prefix(cfg):
-    return re.sub(r"[^a-z0-9]+", "_", cfg.get("prefix") or socket.gethostname().split(".")[0].lower()).strip("_")
 
 
 class Remote:
@@ -279,59 +149,51 @@ class Remote:
         self.notify_service = ha.get("notify_service")
         self.player = cfg.get("player", "")
         self.job_unit = cfg.get("job_unit", "")
-        self.allowed_app_ids = set(cfg.get("allowed_app_ids", []))
         self.prefix = prefix(cfg)
         self.name = cfg.get("device_name", self.prefix.upper())
         self.hwmon = cfg.get("hwmon", "macsmc_hwmon")
         e = lambda domain, obj: f"{domain}.{self.prefix}_{obj}"
         self.locked_entity = e("binary_sensor", "locked")
         self.job_entity = e("input_boolean", "job")
-        self.approve_button = e("input_button", "approve")
-        self.deny_button = e("input_button", "deny")
-        # entity -> (handler, cooldown seconds, reset the toggle before running)
+        # entity -> (handler, cooldown seconds)
         self.actions = {
-            e("input_boolean", "lock"): (self.lock, COOLDOWN_S, False),
-            e("input_boolean", "type_password"): (self.request_password, COOLDOWN_S, False),
-            e("input_boolean", "suspend"): (self.suspend, COOLDOWN_S, True),
-            e("input_boolean", "power_off"): (self.power_off, 1, True),
-            e("input_boolean", "next_track"): (self.next_track, 1, False),
-            self.job_entity: (self.start_job, COOLDOWN_S, None),
+            e("input_button", "lock"): (self.lock, COOLDOWN_S),
+            e("input_button", "unlock"): (self.unlock, COOLDOWN_S),
+            e("input_button", "suspend"): (self.suspend, COOLDOWN_S),
+            e("input_button", "power_off"): (self.power_off, 1),
+            e("input_button", "next_track"): (self.next_track, 1),
+            self.job_entity: (self.start_job, COOLDOWN_S),
         }
         self.busy = set()
         self.last_run = {}
-        self.on_since = {}
         self.armed_at = -CONFIRM_WINDOW_S
         self.job_started = 0.0
         self.job_was_active = False
         self.job_cancelled = False
         self.homekit_only = set(cfg.get("homekit_only", []))
         self.homekit_press = {}
-        self.pending = None
-        self.last_ask = -RESEND_AFTER_S
-        self.prompt_gone_since = None
-        self.handled = {}
-        self.approver = ha.get("approver", {})
-        self.was_locked_now = False
-        self.last_typed = -60
         self.screen_off = False
         self.last_level = {"screen": 70, "keyboard": 50}
+        self.active = True
+        self.to_auth = asyncio.Queue()
         self.sent = {}
         self.session = None
         self.loop = None
         self.poll_now = asyncio.Event()
-        self.idle = Idle(self.on_activity)
+        self.idle = Idle(self.on_input)
 
-    def on_activity(self):
-        # niri powers monitors back on at the first input.
-        self.screen_off = False
-        if self.loop:
-            self.loop.call_soon_threadsafe(self.poll_now.set)
-            if self.was_locked_now:
-                self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.ask_unlock()))
+    def on_input(self, active):
+        if not self.loop:
+            return
+        self.loop.call_soon_threadsafe(self.presence, active)
 
-    async def ask_unlock(self):
-        if time.monotonic() - self.last_ask >= RESEND_AFTER_S and self.notify_service:
-            await self.ask_approval(("lockscreen", 0, "unlock the screen"))
+    def presence(self, active):
+        self.active = active
+        self.to_auth.put_nowait({"type": "presence", "active": active})
+        if active:
+            # niri powers monitors back on at the first input.
+            self.screen_off = False
+            self.poll_now.set()
 
     # ---- actions (run in a worker thread)
 
@@ -347,35 +209,16 @@ class Remote:
         self.screen_off = True
         kbd_off()
 
-    def type_password(self):
-        status = noctalia_status()
-        app_id = focused_app_id()
-        if status.get("locked"):
-            target = "lockscreen"
-            run("niri", "msg", "action", "power-on-monitors")
-            self.screen_off = False
-            time.sleep(0.5)
-        elif status.get("activePanelId") == "polkit":
-            target = "polkit"
-        elif app_id in self.allowed_app_ids:
-            if not sudo_prompting():
-                return password_not_typed("No sudo prompt is waiting")
-            target = app_id
-        else:
-            return password_not_typed(f"Focused window {app_id or 'none'} is not an allowed terminal")
-        log.info("typing password into %s", target)
-        self.type_secret(tty=target not in ("lockscreen", "polkit"))
-
-    def request_password(self):
-        if noctalia_status().get("locked"):
-            prompt = ("lockscreen", 0, "unlock the screen")
-        else:
-            prompt = self.snapshot()["prompt"]
-        if not prompt:
-            return password_not_typed("Nothing is asking for a password")
-        if self.pending and time.monotonic() - self.last_ask < RESEND_AFTER_S:
-            return password_not_typed("An approval request is already on your phone")
-        self.from_thread(self.ask_approval(prompt))
+    def unlock(self):
+        if not noctalia_status().get("locked"):
+            return log.info("unlock: not locked")
+        log.info("unlock: submitting the lock screen for phone approval")
+        # Our own keystrokes must not count as someone at the keyboard.
+        self.loop.call_soon_threadsafe(self.to_auth.put_nowait, {"type": "hold", "s": UNLOCK_HOLD_S})
+        run("niri", "msg", "action", "power-on-monitors")
+        self.screen_off = False
+        time.sleep(0.5)
+        run("wtype", "-M", "ctrl", "a", "-m", "ctrl", "-k", "BackSpace", "-k", "Return")
 
     def suspend(self):
         log.info("suspending")
@@ -474,35 +317,23 @@ class Remote:
                 log.warning("toggle %s failed: %s", entity_id, e)
 
     async def call(self, entity_id):
-        handler, cooldown, reset_first = self.actions[entity_id]
+        handler, cooldown = self.actions[entity_id]
         if entity_id in self.busy:
             return
         self.busy.add(entity_id)
         try:
             if time.monotonic() - self.last_run.get(entity_id, -cooldown) < cooldown:
-                log.warning("%s ignored: cooldown", handler.__name__)
-                if handler == self.request_password:
-                    await asyncio.to_thread(password_not_typed, f"Pressed again within {cooldown} s")
-                return
+                return log.warning("%s ignored: cooldown", handler.__name__)
             if entity_id in self.homekit_only:
                 # HomeKit fires its event just before the service call; allow a little skew.
                 await asyncio.sleep(1)
                 if time.monotonic() - self.homekit_press.pop(entity_id, -60) > 5:
-                    log.warning("%s refused: not pressed from Apple Home", handler.__name__)
-                    if handler == self.request_password:
-                        await asyncio.to_thread(password_not_typed, "Not pressed from Apple Home")
-                    return
+                    return log.warning("%s refused: not pressed from Apple Home", handler.__name__)
             self.last_run[entity_id] = time.monotonic()
-            if reset_first:
-                await self.set_toggle(entity_id, False)
-            await asyncio.wait_for(asyncio.to_thread(handler), 30)
-        except (Exception, SystemExit) as e:
+            await asyncio.to_thread(handler)
+        except Exception:
             log.exception("%s failed", handler.__name__)
-            if handler == self.request_password:
-                await asyncio.to_thread(password_not_typed, f"{type(e).__name__}: {e}"[:120])
         finally:
-            if reset_first is False:
-                await self.set_toggle(entity_id, False)
             self.busy.discard(entity_id)
             self.poll_now.set()
 
@@ -515,10 +346,25 @@ class Remote:
                     pct = max(1, round(float(data["percentage"])))
                 elif data.get("brightness") not in (None, "", "None"):
                     pct = max(1, round(float(data["brightness"]) * 100 / 255))
-                await asyncio.wait_for(asyncio.to_thread(self.command, data.get("target"), data.get("cmd"), pct), 15)
+                await asyncio.to_thread(self.command, data.get("target"), data.get("cmd"), pct)
             except Exception:
                 log.exception("command %s failed", data)
             self.poll_now.set()
+
+    def on_trigger(self, trigger):
+        before, after = trigger.get("from_state"), trigger.get("to_state")
+        # No from_state, or from unavailable: HA restoring the helper, not a press.
+        if not before or not after or before["state"] == "unavailable":
+            return
+        entity_id = trigger["entity_id"]
+        if entity_id == self.job_entity:
+            if before["state"] == "off" and after["state"] == "on":
+                asyncio.create_task(self.call(entity_id))
+            elif before["state"] == "on" and after["state"] == "off":
+                # The agent only turns this off itself once the job is gone, so this is the user.
+                asyncio.create_task(asyncio.to_thread(self.cancel_job))
+        elif entity_id in self.actions:
+            asyncio.create_task(self.call(entity_id))
 
     async def listen(self, queue):
         async with self.session.ws_connect(f"{self.url}/api/websocket", heartbeat=30) as ws:
@@ -527,18 +373,9 @@ class Remote:
             if (await ws.receive_json()).get("type") != "auth_ok":
                 raise SystemExit("HA rejected the token")
             await ws.send_json({"id": 1, "type": "subscribe_trigger",
-                                "trigger": {"platform": "state", "entity_id": list(self.actions), "to": "on"}})
+                                "trigger": {"platform": "state", "entity_id": list(self.actions)}})
             await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "ha_remote_cmd"})
-            await ws.send_json({"id": 3, "type": "subscribe_trigger",
-                                "trigger": {"platform": "state", "entity_id": self.job_entity, "from": "on", "to": "off"}})
-            await ws.send_json({"id": 4, "type": "subscribe_events", "event_type": "homekit_state_change"})
-            await ws.send_json({"id": 5, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
-            await ws.send_json({"id": 6, "type": "subscribe_trigger", "trigger": {
-                "platform": "state", "entity_id": [self.approve_button, self.deny_button]}})
-            # Left on while we were offline: clear without running.
-            for entity_id in self.actions:
-                if entity_id != self.job_entity:
-                    await self.set_toggle(entity_id, False)
+            await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": "homekit_state_change"})
             # HA may have restarted and lost pushed states.
             self.sent.clear()
             self.poll_now.set()
@@ -551,57 +388,43 @@ class Remote:
                     raise SystemExit(f"subscribe failed: {data.get('error')}")
                 if data.get("type") != "event":
                     continue
-                if data["id"] == 2:
+                if data["id"] == 1:
+                    self.on_trigger(data["event"]["variables"]["trigger"])
+                elif data["id"] == 2:
                     queue.put_nowait(data["event"]["data"])
-                    continue
-                if data["id"] == 4:
+                elif data["id"] == 3:
                     hk = data["event"]["data"]
-                    if hk.get("service") == "turn_on":
+                    if hk.get("service") in ("turn_on", "press"):
                         self.homekit_press[hk.get("entity_id")] = time.monotonic()
-                    continue
-                if data["id"] == 5:
-                    if data["event"]["data"].get("action", "").startswith("HAREMOTE_"):
-                        asyncio.create_task(self.on_notification_action(data["event"]))
-                    continue
-                if data["id"] == 6:
-                    trigger = data["event"]["variables"]["trigger"]
-                    if trigger.get("from_state") is not None:
-                        asyncio.create_task(self.on_button(trigger))
-                    continue
-                if data["id"] == 3:
-                    # The agent only turns this off itself once the job is gone, so this is the user.
-                    asyncio.create_task(asyncio.to_thread(self.cancel_job))
-                    continue
-                trigger = data["event"]["variables"]["trigger"]
-                # from_state is None when HA restores the helper at startup, not a press.
-                if trigger.get("from_state") is None:
-                    continue
-                if trigger["entity_id"] in self.actions:
-                    asyncio.create_task(self.call(trigger["entity_id"]))
 
-    def snapshot_prompt(self, status=None):
-        status = status or noctalia_status()
-        if status.get("activePanelId") == "polkit":
-            pkexec = [pid for pid in run("pgrep", "-x", "pkexec").stdout.split() if "zombie" not in read(f"/proc/{pid}/status", "")]
-            if pkexec:
-                return ("polkit", int(pkexec[0]), cmdline(pkexec[0]).removeprefix("pkexec ")[:120])
-            # The panel lingers briefly after pkexec exits; do not mistake that for a new request.
-            if time.monotonic() - self.last_typed < 5:
-                return None
-            return ("polkit", 0, "a system action")
-        sudo_pid = sudo_prompting()
-        if sudo_pid:
-            return ("sudo", sudo_pid, (cmdline(sudo_pid).removeprefix("sudo ") or "sudo")[:120])
-        return None
+    async def auth_link(self):
+        while True:
+            try:
+                _, writer = await asyncio.open_unix_connection(AUTH_SOCKET)
+                while not self.to_auth.empty():
+                    self.to_auth.get_nowait()
+                self.to_auth.put_nowait({"type": "presence", "active": self.active})
+                try:
+                    while True:
+                        writer.write(json.dumps(await self.to_auth.get()).encode() + b"\n")
+                        await writer.drain()
+                finally:
+                    writer.close()
+            except OSError:
+                pass
+            await asyncio.sleep(10)
 
     def snapshot(self):
         status = noctalia_status()
-        snap = {"locked": status.get("locked"), "prompt": self.snapshot_prompt(status), "screen": percent(SCREEN), "keyboard": percent(KBD),
-                "battery": read(BATTERY / "capacity"), "battery_state": read(BATTERY / "status"),
-                "plugged": read(AC / "online") == "1", "power": system_power_w(self.hwmon), "job": self.job_active()}
-        status = run("playerctl", "-p", self.player, "status").stdout.strip() if self.player else ""
-        snap["music"] = status or "Off"
-        if status:
+        snap = {"locked": status.get("locked"), "screen": percent(SCREEN), "keyboard": percent(KBD),
+                "power": system_power_w(self.hwmon), "job": self.job_active()}
+        if BATTERY:
+            snap["battery"], snap["battery_state"] = read(BATTERY / "capacity"), read(BATTERY / "status")
+        if AC:
+            snap["plugged"] = read(AC / "online") == "1"
+        music = run("playerctl", "-p", self.player, "status").stdout.strip() if self.player else ""
+        snap["music"] = music or "Off"
+        if music:
             volume = run("playerctl", "-p", self.player, "volume").stdout.strip()
             snap["volume"] = round(float(volume) * 100) if volume else None
             meta = run("playerctl", "-p", self.player, "metadata", "--format", "{{artist}}\t{{title}}").stdout.strip()
@@ -610,9 +433,6 @@ class Remote:
 
     async def publish(self):
         s = await asyncio.to_thread(self.snapshot)
-        self.was_locked_now = s["locked"]
-        if not s["locked"] and self.pending and self.pending["kind"] == "lockscreen":
-            await self.clear_approval()
         if not s["locked"]:
             await asyncio.to_thread(kbd_restore)
         for target in ("screen", "keyboard"):
@@ -624,12 +444,14 @@ class Remote:
                               friendly_name=f"{name} locked", device_class="lock", icon="mdi:monitor-lock")
         await self.post_state(f"binary_sensor.{self.prefix}_active", "off" if s["locked"] or self.idle.idle else "on",
                               friendly_name=f"{name} in use", device_class="occupancy")
-        await self.post_state(f"binary_sensor.{self.prefix}_plugged_in", "on" if s["plugged"] else "off",
-                              friendly_name=f"{name} plugged in", device_class="plug")
-        await self.post_state(f"sensor.{self.prefix}_battery", s["battery"], friendly_name=f"{name} battery",
-                              device_class="battery", unit_of_measurement="%", state_class="measurement")
-        await self.post_state(f"sensor.{self.prefix}_battery_state", s["battery_state"],
-                              friendly_name=f"{name} battery state", icon="mdi:battery-charging")
+        if "plugged" in s:
+            await self.post_state(f"binary_sensor.{self.prefix}_plugged_in", "on" if s["plugged"] else "off",
+                                  friendly_name=f"{name} plugged in", device_class="plug")
+        if "battery" in s:
+            await self.post_state(f"sensor.{self.prefix}_battery", s["battery"], friendly_name=f"{name} battery",
+                                  device_class="battery", unit_of_measurement="%", state_class="measurement")
+            await self.post_state(f"sensor.{self.prefix}_battery_state", s["battery_state"],
+                                  friendly_name=f"{name} battery state", icon="mdi:battery-charging")
         await self.post_state(f"sensor.{self.prefix}_screen_brightness", 0 if self.screen_off else s["screen"],
                               friendly_name=f"{name} screen brightness", unit_of_measurement="%")
         await self.post_state(f"sensor.{self.prefix}_keyboard_brightness", s["keyboard"],
@@ -647,138 +469,6 @@ class Remote:
             elif "Temp" in label or "Hotspot" in label:
                 await self.post_state(f"sensor.{self.prefix}_{key}_temp", round(value / 1000, 1), friendly_name=f"{self.name} {label}",
                                       device_class="temperature", unit_of_measurement="°C", state_class="measurement")
-
-    async def ask_approval(self, prompt):
-        kind, pid, what = prompt
-        if self.pending and self.pending["prompt"][:2] == prompt[:2]:
-            # Same prompt keeps its code, so an earlier notification for it stays valid.
-            nonce = self.pending["nonce"]
-        else:
-            if self.pending:
-                await self.clear_notification(self.pending["nonce"])
-            nonce = secrets.token_hex(16)
-            self.pending = {"kind": kind, "pid": pid, "nonce": nonce, "prompt": prompt}
-        self.last_ask = time.monotonic()
-        log.info("asking approval for %s: %s", kind, what)
-        await self.post_state(f"sensor.{self.prefix}_request", f"{kind}: {what}"[:255], friendly_name=f"{self.name} request",
-                              icon="mdi:shield-key", kind=kind)
-        await self.service("notify", self.notify_service, {
-            "title": f"{self.name} wants a password",
-            "message": f"{time.strftime('%H:%M')}  {kind}: {what}",
-            "data": {"tag": f"{self.prefix}-{nonce[:8]}", "url": f"/{self.prefix}-remote/0", "actions": [
-                {"action": f"HAREMOTE_APPROVE_{nonce}", "title": "Approve", "authenticationRequired": True},
-                {"action": f"HAREMOTE_DENY_{nonce}", "title": "Deny", "destructive": True}]}})
-
-    async def clear_notification(self, nonce):
-        await self.service("notify", self.notify_service,
-                           {"message": "clear_notification", "data": {"tag": f"{self.prefix}-{nonce[:8]}"}})
-
-    async def clear_approval(self):
-        pending, self.pending = self.pending, None
-        await self.post_state(f"sensor.{self.prefix}_request", "none", friendly_name=f"{self.name} request", icon="mdi:shield-key")
-        if pending:
-            await self.clear_notification(pending["nonce"])
-
-    async def watch_prompts(self, prompt):
-        if not self.notify_service:
-            return
-        if prompt:
-            self.prompt_gone_since = None
-            handled = time.monotonic() - self.handled.get(prompt[:2], -60) < 60
-            if (self.pending is None or self.pending["prompt"][:2] != prompt[:2]) and not handled \
-                    and self.cfg.get("notify_prompts", True):
-                await self.ask_approval(prompt)
-        elif self.pending and self.pending["kind"] == "lockscreen":
-            # An accidental bump should not leave an approval waiting indefinitely.
-            if time.monotonic() - self.last_ask > LOCKSCREEN_EXPIRE_S:
-                log.info("lock screen request expired")
-                await self.clear_approval()
-        elif self.pending:
-            self.prompt_gone_since = self.prompt_gone_since or time.monotonic()
-            if time.monotonic() - self.prompt_gone_since > PROMPT_GONE_S:
-                await self.clear_approval()
-
-    def approve(self, pending):
-        kind, pid = pending["kind"], pending["pid"]
-        status = noctalia_status()
-        if kind == "lockscreen":
-            if not status.get("locked"):
-                return password_not_typed("The screen is no longer locked")
-            run("niri", "msg", "action", "power-on-monitors")
-            self.screen_off = False
-            time.sleep(0.5)
-        elif kind == "polkit":
-            if status.get("activePanelId") != "polkit":
-                return password_not_typed("The polkit prompt is gone")
-        elif kind == "sudo":
-            if status.get("locked") or status.get("panelOpen"):
-                return password_not_typed("Screen is locked or a panel is open")
-            if pid not in sudo_prompts():
-                return password_not_typed("That sudo prompt is gone")
-            if not focus_window_of(pid):
-                return password_not_typed("Could not focus the terminal window")
-            # Re-check after focusing: the prompt may have died and left a shell in that window.
-            if pid not in sudo_prompts():
-                return password_not_typed("That sudo prompt is gone")
-        log.info("typing password into %s", kind)
-        self.type_secret(tty=kind == "sudo")
-
-    def type_secret(self, tty):
-        self.last_typed = time.monotonic()
-        if tty:
-            run("wtype", "-M", "ctrl", "u", "-m", "ctrl")
-        else:
-            run("wtype", "-M", "ctrl", "a", "-m", "ctrl", "-k", "BackSpace")
-        # Via stdin so the password never appears in argv (/proc/*/cmdline).
-        subprocess.run(["wtype", "-"], input=secret("unlock"), text=True, check=True, timeout=10)
-        run("wtype", "-k", "Return")
-
-    def deny(self, pending):
-        log.info("denying %s prompt", pending["kind"])
-        if pending["kind"] == "sudo":
-            os.kill(pending["pid"], signal.SIGINT)
-        else:
-            run("noctalia", "msg", "panel-close", "polkit")
-
-    def sender_ok(self, context):
-        sender = {"user_id": (context or {}).get("user_id")}
-        if any(sender.get(k) != v for k, v in self.approver.items()):
-            log.warning("ignoring approval from %s", sender)
-            return False
-        return True
-
-    async def on_notification_action(self, event):
-        action = event["data"].get("action", "")
-        verb, _, nonce = action.rpartition("_")
-        pending = self.pending
-        if not pending or not secrets.compare_digest(nonce, pending["nonce"]):
-            log.warning("ignoring stale notification action")
-            return await asyncio.to_thread(password_not_typed, "That request is no longer current")
-        if not self.sender_ok(event.get("context")):
-            return await asyncio.to_thread(password_not_typed, "Approval came from an unknown user")
-        await self.decide(verb, pending)
-
-    async def on_button(self, trigger):
-        if not self.sender_ok(trigger["to_state"].get("context")):
-            return
-        pending = self.pending
-        if not pending:
-            return log.warning("%s pressed with nothing pending", trigger["entity_id"])
-        await self.decide("HAREMOTE_APPROVE" if trigger["entity_id"] == self.approve_button else "HAREMOTE_DENY", pending)
-
-    async def decide(self, verb, pending):
-        # Suppress re-asking for this prompt while it winds down after the decision.
-        self.handled[pending["prompt"][:2]] = time.monotonic()
-        await self.clear_approval()
-        handler = {"HAREMOTE_APPROVE": self.approve, "HAREMOTE_DENY": self.deny}.get(verb)
-        if handler:
-            try:
-                await asyncio.wait_for(asyncio.to_thread(handler, pending), 30)
-            except Exception as e:
-                log.exception("%s failed", verb)
-                if verb == "HAREMOTE_APPROVE":
-                    await asyncio.to_thread(password_not_typed, f"{type(e).__name__}: {e}"[:120])
-        self.poll_now.set()
 
     async def mirror_job(self, active):
         if active != self.job_was_active and time.monotonic() - self.job_started > 10:
@@ -801,29 +491,9 @@ class Remote:
                 self.last_run[self.job_entity] = time.monotonic()
                 await self.set_toggle(self.job_entity, active)
 
-    async def unstick(self):
-        now = time.monotonic()
-        for entity_id in self.actions:
-            if entity_id == self.job_entity:
-                continue
-            async with self.session.get(f"{self.url}/api/states/{entity_id}") as r:
-                on = r.ok and (await r.json()).get("state") == "on"
-            if not on or entity_id in self.busy:
-                self.on_since.pop(entity_id, None)
-            elif now - self.on_since.setdefault(entity_id, now) > STUCK_AFTER_S:
-                log.warning("%s stuck on: clearing", entity_id)
-                await self.set_toggle(entity_id, False)
-
-    async def prompt_loop(self):
-        while True:
-            try:
-                await self.watch_prompts((await asyncio.to_thread(self.snapshot_prompt)))
-            except Exception as e:
-                log.debug("prompt poll failed: %s", e)
-            await asyncio.sleep(PROMPT_POLL_S)
-
     async def poll(self):
         slow = 0.0
+        last_error = None
         while True:
             try:
                 s = await self.publish()
@@ -836,9 +506,11 @@ class Remote:
                                           datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                           friendly_name=f"{self.name} last seen", device_class="timestamp")
                 await self.mirror_job(s["job"])
-                await self.unstick()
+                last_error = None
             except Exception as e:
-                log.debug("poll failed: %s", e)
+                if repr(e) != last_error:
+                    log.warning("poll failed: %r", e)
+                last_error = repr(e)
             self.poll_now.clear()
             try:
                 await asyncio.wait_for(self.poll_now.wait(), self.cfg.get("poll_interval_s", 5))
@@ -854,8 +526,8 @@ class Remote:
         async with aiohttp.ClientSession(headers=headers, timeout=timeout) as self.session:
             queue = asyncio.Queue()
             asyncio.create_task(self.poll())
-            asyncio.create_task(self.prompt_loop())
             asyncio.create_task(self.commands(queue))
+            asyncio.create_task(self.auth_link())
             delay = 1
             while True:
                 try:
@@ -870,9 +542,7 @@ class Remote:
 def main():
     locale.setlocale(locale.LC_TIME, "")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    with open(CONFIG_PATH, "rb") as f:
-        cfg = tomllib.load(f)
-    asyncio.run(Remote(cfg).run_forever())
+    asyncio.run(Remote(load_config()).run_forever())
 
 
 if __name__ == "__main__":

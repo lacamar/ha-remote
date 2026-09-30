@@ -1,8 +1,8 @@
-%global tag 0.1.3
+%global tag 0.2.0
 
 Name:     ha-remote
 Version:  %{tag}
-Release:  2%{?dist}
+Release:  1%{?dist}
 Summary:  Control a niri laptop from Home Assistant and Apple Home
 
 License:  MIT
@@ -14,6 +14,7 @@ BuildArch: noarch
 BuildRequires: python3-pywayland
 BuildRequires: wayland-devel
 BuildRequires: wayland-protocols-devel
+BuildRequires: python3-devel
 BuildRequires: systemd-rpm-macros
 %{?systemd_ordering}
 
@@ -23,13 +24,14 @@ Requires: wtype
 Requires: brightnessctl
 Requires: playerctl
 Requires: libsecret
-Requires: libnotify
 Requires: niri
+Requires: /usr/bin/noctalia
+Requires: pam
 
 %description
 Agent that connects to Home Assistant over WebSocket and exposes the laptop as
-switches, lights, a fan and sensors, with phone-approved typing of the login
-password into sudo, polkit and the lock screen.
+switches, lights, a fan and sensors, with phone approval for sudo, polkit and
+the lock screen.
 
 %prep
 %autosetup
@@ -43,28 +45,52 @@ python3 -m pywayland.scanner -o protocols/hrproto \
 
 %install
 install -Dm755 ha-remote ha-remote-setup -t %{buildroot}%{_bindir}
+install -Dm755 ha-remote-auth -t %{buildroot}%{_bindir}
+install -Dm755 pam-helper -t %{buildroot}%{_libexecdir}/%{name}
+install -Dm644 haremote.py -t %{buildroot}%{python3_sitelib}
 install -Dm644 ha-remote.service -t %{buildroot}%{_userunitdir}
-install -Dm644 config.example.toml -t %{buildroot}%{_datadir}/%{name}
+install -Dm644 ha-remote-auth.service -t %{buildroot}%{_unitdir}
+install -Dm644 config.example.toml auth.example.toml -t %{buildroot}%{_datadir}/%{name}
+install -dm700 %{buildroot}%{_sysconfdir}/%{name}
 cp -r protocols %{buildroot}%{_datadir}/%{name}/
 
 %post
 %systemd_user_post %{name}.service
+%systemd_post %{name}-auth.service
 
 %preun
 %systemd_user_preun %{name}.service
+%systemd_preun %{name}-auth.service
+if [ $1 -eq 0 ]; then
+    %{_bindir}/ha-remote-auth disable || :
+fi
 
 %postun
 %systemd_user_postun_with_restart %{name}.service
+%systemd_postun_with_restart %{name}-auth.service
 
 %files
 %license LICENSE
 %doc README.md
 %{_bindir}/ha-remote
 %{_bindir}/ha-remote-setup
+%{_bindir}/ha-remote-auth
+%{_libexecdir}/%{name}/
+%pycached %{python3_sitelib}/haremote.py
 %{_userunitdir}/ha-remote.service
+%{_unitdir}/ha-remote-auth.service
+%dir %attr(0700,root,root) %{_sysconfdir}/%{name}
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.0-1
+- Phone approval via PAM instead of typing the password
+- Root ha-remote-auth service
+- Momentary controls as input_button
+- Unlock button
+- Drop dashboard approve/deny and request sensor
+- Fix hosts without battery or AC
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.1.3-2
 - Restart user service on upgrade
 - Add systemd ordering

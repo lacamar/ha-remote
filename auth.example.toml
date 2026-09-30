@@ -1,0 +1,11 @@
+# /etc/ha-remote/auth.toml, mode 600. Read by the root ha-remote-auth service.
+# Local user whose sudo, polkit and lock screen prompts may be approved.
+user = "me"
+device_name = "Laptop"
+url = "https://homeassistant.example.ts.net"
+# Long-lived token of a dedicated HA user, never the approver's.
+token = "<token>"
+notify_service = "mobile_app_phone"
+# HA user of the phone app; only its notification taps approve.
+approver_user_id = "<ha user id>"
+timeout_s = 60
