@@ -128,9 +128,12 @@ class Auth:
 
     async def authorize(self, pid, uid, req, reader, writer):
         prompt = self.describe(pid, uid, req)
-        if not prompt or not self.connected or self.present():
+        if not prompt or not self.connected:
             return False
         kind, what, sudo_pid = prompt
+        # Someone just typed the password into the lock screen.
+        if kind == "lockscreen" and self.present():
+            return False
         writer.write(b'{"asking": true}\n')
         await writer.drain()
         nonce = secrets.token_hex(16)
@@ -179,7 +182,7 @@ class Auth:
                     presence = True
                     self.active, self.active_at = bool(req.get("active")), time.monotonic()
                     if self.active and time.monotonic() >= self.hold_until:
-                        # Back at the keyboard: drop phone requests so the password prompt shows.
+                        # Input at the laptop: drop phone requests so the password prompt shows.
                         self.abandon()
                 elif req.get("type") == "hold" and owner:
                     self.hold_until = time.monotonic() + min(float(req.get("s", 0)), HOLD_MAX_S)

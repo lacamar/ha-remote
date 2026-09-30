@@ -1,4 +1,4 @@
-%global tag 0.2.0
+%global tag 0.2.1
 
 Name:     ha-remote
 Version:  %{tag}
@@ -83,6 +83,9 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.1-1
+- Phone first for sudo and polkit, input cancels
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.0-1
 - Phone approval via PAM instead of typing the password
 - Root ha-remote-auth service
