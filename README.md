@@ -11,13 +11,6 @@ The agent connects out to HA over WebSocket, so it needs no broker and no inboun
     sudo dnf copr enable lacamar/arm64-misc
     sudo dnf install ha-remote
 
-Or from a checkout: copy `ha-remote`, `ha-remote-setup` and `haremote.py` to your PATH,
-`ha-remote.service` to `~/.config/systemd/user/`, and generate the Wayland bindings:
-
-    mkdir -p ~/.local/share/ha-remote/protocols/hrproto && touch $_/__init__.py
-    python3 -m pywayland.scanner -o ~/.local/share/ha-remote/protocols/hrproto \
-        -i /usr/share/wayland/wayland.xml /usr/share/wayland-protocols/staging/ext-idle-notify/ext-idle-notify-v1.xml
-
 ## Set up
 
 1. In HA, create a dedicated admin user for ha-remote (not the one your phone app logs in as),

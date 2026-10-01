@@ -1,4 +1,4 @@
-%global tag 0.2.3
+%global tag 0.2.4
 
 Name:     ha-remote
 Version:  %{tag}
@@ -44,8 +44,7 @@ python3 -m pywayland.scanner -o protocols/hrproto \
     %{_datadir}/wayland-protocols/staging/ext-idle-notify/ext-idle-notify-v1.xml
 
 %install
-install -Dm755 ha-remote ha-remote-setup -t %{buildroot}%{_bindir}
-install -Dm755 ha-remote-auth -t %{buildroot}%{_bindir}
+install -Dm755 ha-remote ha-remote-setup ha-remote-auth -t %{buildroot}%{_bindir}
 install -Dm755 pam-helper -t %{buildroot}%{_libexecdir}/%{name}
 install -Dm644 haremote.py -t %{buildroot}%{python3_sitelib}
 install -Dm644 ha-remote.service -t %{buildroot}%{_userunitdir}
@@ -86,6 +85,12 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.4-1
+- Drop homekit_only option
+- Drop 0.1 helper migration from setup
+- Drop from-checkout protocol path
+- Simplify job toggle and setup
+
 * Wed Sep 30 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.3-1
 - No info line in the polkit panel
 

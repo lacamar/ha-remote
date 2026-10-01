@@ -7,8 +7,6 @@ player = "Feishin"
 job_unit = ""
 # hwmon name for power, temperature and fan sensors.
 hwmon = "macsmc_hwmon"
-# Toggles that only act when pressed from Apple Home (HomeKit Bridge).
-homekit_only = []
 
 [ha]
 url = "https://homeassistant.example.ts.net"
