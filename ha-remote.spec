@@ -1,4 +1,4 @@
-%global tag 0.2.4
+%global tag 0.2.5
 
 Name:     ha-remote
 Version:  %{tag}
@@ -48,6 +48,7 @@ install -Dm755 ha-remote ha-remote-setup ha-remote-auth -t %{buildroot}%{_bindir
 install -Dm755 pam-helper -t %{buildroot}%{_libexecdir}/%{name}
 install -Dm644 haremote.py -t %{buildroot}%{python3_sitelib}
 install -Dm644 ha-remote.service -t %{buildroot}%{_userunitdir}
+install -Dm644 70-ha-remote-nuphy.rules -t %{buildroot}%{_udevrulesdir}
 install -Dm644 ha-remote-auth.service -t %{buildroot}%{_unitdir}
 install -Dm644 config.example.toml auth.example.toml -t %{buildroot}%{_datadir}/%{name}
 install -dm700 %{buildroot}%{_sysconfdir}/%{name}
@@ -80,11 +81,17 @@ fi
 %{_libexecdir}/%{name}/
 %pycached %{python3_sitelib}/haremote.py
 %{_userunitdir}/ha-remote.service
+%{_udevrulesdir}/70-ha-remote-nuphy.rules
 %{_unitdir}/ha-remote-auth.service
 %dir %attr(0700,root,root) %{_sysconfdir}/%{name}
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.5-1
+- Mirror keyboard backlight to NuPhy keyboards
+- udev access to NuPhy vendor HID interface
+- Keyboard backlight via noctalia/UPower
+
 * Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.4-1
 - Drop homekit_only option
 - Drop 0.1 helper migration from setup

@@ -1,0 +1,1 @@
+SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="19f5", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"

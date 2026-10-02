@@ -21,6 +21,9 @@ The agent connects out to HA over WebSocket, so it needs no broker and no inboun
 5. `systemctl --user enable --now ha-remote`
 6. For Apple Home, add `input_button` and `input_boolean` to the domains your HomeKit Bridge exposes.
 
+A NuPhy keyboard (NuPhy IO models, wired or 2.4 GHz dongle) follows the laptop's keyboard
+backlight; the packaged udev rule opens only its vendor HID interface to the seat user.
+
 ## Phone approval
 
     sudo install -m600 /usr/share/ha-remote/auth.example.toml /etc/ha-remote/auth.toml   # then edit

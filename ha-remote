@@ -4,6 +4,7 @@ import glob
 import json
 import logging
 import os
+import select
 import subprocess
 import sys
 import threading
@@ -55,8 +56,14 @@ def percent(device):
 
 
 def set_percent(device, pct):
-    if device is not None:
-        run("brightnessctl", "-d", device.name, "set", f"{max(0, min(100, pct))}%")
+    pct = max(0, min(100, pct))
+    if device is None:
+        return
+    # Via UPower, so noctalia's OSD and cached level follow.
+    if device == KBD:
+        run("noctalia", "msg", "keyboard-backlight-set", str(pct))
+    else:
+        run("brightnessctl", "-d", device.name, "set", f"{pct}%")
 
 
 def noctalia_status():
@@ -68,8 +75,8 @@ def kbd_off():
         return
     # Save only once, or a second lock would save 0 and unlock would restore darkness.
     if not KBD_SAVE.exists():
-        KBD_SAVE.write_text(read(KBD / "brightness", "0"))
-    run("brightnessctl", "-d", KBD.name, "set", "0")
+        KBD_SAVE.write_text(str(percent(KBD) or 0))
+    set_percent(KBD, 0)
 
 
 def kbd_restore():
@@ -78,7 +85,41 @@ def kbd_restore():
         return
     KBD_SAVE.unlink(missing_ok=True)
     if value.isdigit():
-        run("brightnessctl", "-d", KBD.name, "set", value)
+        set_percent(KBD, int(value))
+
+
+def nuphy_xfer(fd, report):
+    report[3] = sum(report[4:]) & 0xff
+    os.write(fd, bytes([0, *report]))
+    while select.select([fd], [], [], 1)[0]:
+        reply = os.read(fd, 64)
+        if reply[1] == report[1]:
+            return reply
+    raise TimeoutError
+
+
+def nuphy_set(level):
+    reached = False
+    for path in glob.glob("/dev/input/by-id/usb-NuPhy*-if03-hidraw"):
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            key = nuphy_xfer(fd, [0x55, 0xee, 0, 0, 0, 0, 0, 0, *os.urandom(56)])[4]
+            frame = lambda cmd, *fields: [0x55, cmd, 0, 0, *(b ^ key for b in fields)] + [0] * (60 - len(fields))
+            apply = frame(0xd5, 0x11, 0, 0, 0)
+            # A dongle whose keyboard is on another link answers with zeros.
+            if nuphy_xfer(fd, apply)[4] ^ key != 0x11:
+                continue
+            nuphy_xfer(fd, frame(0xd6, 1, 1, 0, 1, level))
+            nuphy_xfer(fd, apply)
+            reached = True
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            os.close(fd)
+    return reached
 
 
 def smc(name):
@@ -480,6 +521,17 @@ class Remote:
                 self.last_run[self.job_entity] = time.monotonic()
                 await self.service("input_boolean", "turn_on" if active else "turn_off", {"entity_id": self.job_entity})
 
+    async def sync_nuphy(self):
+        pushed = tried = None
+        tried_at = 0.0
+        while True:
+            level = percent(KBD)
+            if level != pushed and (level != tried or time.monotonic() - tried_at > 10):
+                tried, tried_at = level, time.monotonic()
+                if await asyncio.to_thread(nuphy_set, level):
+                    pushed = level
+            await asyncio.sleep(0.5)
+
     async def poll(self):
         slow = 0.0
         last_error = None
@@ -517,6 +569,8 @@ class Remote:
             asyncio.create_task(self.poll())
             asyncio.create_task(self.commands(queue))
             asyncio.create_task(self.auth_link())
+            if KBD:
+                asyncio.create_task(self.sync_nuphy())
             delay = 1
             while True:
                 try:
