@@ -1,4 +1,4 @@
-%global tag 0.2.6
+%global tag 0.2.7
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.7-1
+- Pause every MPRIS player, music off included
+- Momentary controls back to input_boolean, reset at once
+
 * Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.6-1
 - Pause music button
 - README: NuPhy sync is wired only

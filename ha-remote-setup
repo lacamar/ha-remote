@@ -15,9 +15,9 @@ PREFIX = prefix(CFG)
 NAME = CFG.get("device_name", PREFIX.upper())
 TOKEN = secret("token")
 
-TOGGLES = {"job": ("Job", "mdi:package-variant-closed")}
-BUTTONS = {"lock": ("Lock", "mdi:lock"), "unlock": ("Unlock", "mdi:lock-open-variant"),
-           "suspend": ("Suspend", "mdi:power-sleep"), "power_off": ("Power off", "mdi:power"),
+HELPERS = {"job": ("Job", "mdi:package-variant-closed"), "lock": ("Lock", "mdi:lock"),
+           "unlock": ("Unlock", "mdi:lock-open-variant"), "suspend": ("Suspend", "mdi:power-sleep"),
+           "power_off": ("Power off", "mdi:power"),
            "next_track": ("Next track", "mdi:skip-next"), "pause_music": ("Pause music", "mdi:pause")}
 
 
@@ -80,9 +80,8 @@ def event(target, cmd, key=None):
 
 
 def helpers():
-    create = [{"type": f"input_{kind}/create", "name": f"{PREFIX} {obj}", "icon": icon}
-              for kind, items in (("boolean", TOGGLES), ("button", BUTTONS))
-              for obj, (_, icon) in items.items() if not exists(e(f"input_{kind}", obj))]
+    create = [{"type": "input_boolean/create", "name": f"{PREFIX} {obj}", "icon": icon}
+              for obj, (_, icon) in HELPERS.items() if not exists(e("input_boolean", obj))]
     for command, result in zip(create, ws(create)):
         print(command["name"], "created" if result.get("success") else result.get("error"))
 
@@ -110,8 +109,7 @@ def names_and_area():
     areas = ws([{"type": "config/area_registry/list"}])[0]["result"]
     area = next((a["area_id"] for a in areas if a["name"] == NAME), None) \
         or ws([{"type": "config/area_registry/create", "name": NAME, "icon": "mdi:laptop"}])[0]["result"]["area_id"]
-    named = [(domain, obj, name) for domain, items in (("input_boolean", TOGGLES), ("input_button", BUTTONS))
-             for obj, (name, _) in items.items()]
+    named = [("input_boolean", obj, name) for obj, (name, _) in HELPERS.items()]
     named += [("light", "screen", "Screen"), ("light", "keyboard", "Keyboard"),
               ("fan", "music", "Music"), ("binary_sensor", "online", "Online")]
     updates = [{"type": "config/entity_registry/update", "entity_id": e(domain, obj), "name": name, "area_id": area}
@@ -132,7 +130,7 @@ def automations():
         "triggers": [{"trigger": "state", "entity_id": person, "from": "home"}],
         # device_class lock: on = unlocked
         "conditions": [online, {"condition": "state", "entity_id": e("binary_sensor", "locked"), "state": "on"}],
-        "actions": [{"action": "input_button.press", "target": {"entity_id": e("input_button", "lock")}}]}))
+        "actions": [{"action": "input_boolean.turn_on", "target": {"entity_id": e("input_boolean", "lock")}}]}))
 
 
 def dashboard():
@@ -141,8 +139,7 @@ def dashboard():
         ws([{"type": "lovelace/dashboards/create", "url_path": path, "title": NAME, "icon": "mdi:laptop",
              "show_in_sidebar": True, "require_admin": False}])
     view = {"title": NAME, "path": "0", "cards": [
-        {"type": "entities", "title": "Controls", "entities": [e("input_button", o) for o in BUTTONS]
-                                                              + [e("input_boolean", o) for o in TOGGLES]
+        {"type": "entities", "title": "Controls", "entities": [e("input_boolean", o) for o in HELPERS]
                                                               + [e("light", "screen"), e("light", "keyboard"), e("fan", "music")]},
         {"type": "entities", "title": "Status", "entities": [
             e("binary_sensor", "online"), e("binary_sensor", "locked"), e("binary_sensor", "active"), e("sensor", "battery"),
@@ -156,7 +153,7 @@ def main():
     names_and_area()
     automations()
     dashboard()
-    print(f"Done. Expose the input_button and input_boolean domains in HA's HomeKit Bridge to get the {NAME} switches in Apple Home.")
+    print(f"Done. Expose the input_boolean domain in HA's HomeKit Bridge to get the {NAME} switches in Apple Home.")
 
 
 if __name__ == "__main__":

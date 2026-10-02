@@ -189,12 +189,12 @@ class Remote:
         self.job_entity = e("input_boolean", "job")
         # entity -> (handler, cooldown seconds)
         self.actions = {
-            e("input_button", "lock"): (self.lock, COOLDOWN_S),
-            e("input_button", "unlock"): (self.unlock, COOLDOWN_S),
-            e("input_button", "suspend"): (self.suspend, COOLDOWN_S),
-            e("input_button", "power_off"): (self.power_off, 1),
-            e("input_button", "next_track"): (self.next_track, 1),
-            e("input_button", "pause_music"): (self.pause_music, 1),
+            e("input_boolean", "lock"): (self.lock, COOLDOWN_S),
+            e("input_boolean", "unlock"): (self.unlock, COOLDOWN_S),
+            e("input_boolean", "suspend"): (self.suspend, COOLDOWN_S),
+            e("input_boolean", "power_off"): (self.power_off, 1),
+            e("input_boolean", "next_track"): (self.next_track, 1),
+            e("input_boolean", "pause_music"): (self.pause_music, 1),
             self.job_entity: (self.start_job, COOLDOWN_S),
         }
         self.busy = set()
@@ -276,7 +276,9 @@ class Remote:
         run("playerctl", "-p", self.player, "next")
 
     def pause_music(self):
-        run("playerctl", "-a", "pause")
+        # playerctl -a stops at the first player that errors.
+        for player in run("playerctl", "-l").stdout.split():
+            run("playerctl", "-p", player, "pause")
 
     def job_active(self):
         if not self.job_unit:
@@ -300,9 +302,11 @@ class Remote:
 
     def command(self, target, cmd, pct):
         if target == "music":
+            if cmd == "off":
+                return self.pause_music()
             if cmd == "level":
                 run("playerctl", "-p", self.player, "volume", f"{pct / 100:.2f}")
-            run("playerctl", "-p", self.player, "pause" if cmd == "off" else "play")
+            run("playerctl", "-p", self.player, "play")
             return
         device = {"screen": SCREEN, "keyboard": KBD}.get(target)
         if device is None:
@@ -389,7 +393,9 @@ class Remote:
             elif before["state"] == "on" and after["state"] == "off":
                 # The agent only turns this off itself once the job is gone, so this is the user.
                 asyncio.create_task(asyncio.to_thread(self.cancel_job))
-        elif entity_id in self.actions:
+        elif after["state"] == "on":
+            # Momentary: HomeKit's own reset for input_button takes 10 s.
+            asyncio.create_task(self.service("input_boolean", "turn_off", {"entity_id": entity_id}))
             asyncio.create_task(self.call(entity_id))
 
     async def listen(self, queue):
