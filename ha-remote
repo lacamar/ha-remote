@@ -194,6 +194,7 @@ class Remote:
             e("input_button", "suspend"): (self.suspend, COOLDOWN_S),
             e("input_button", "power_off"): (self.power_off, 1),
             e("input_button", "next_track"): (self.next_track, 1),
+            e("input_button", "pause_music"): (self.pause_music, 1),
             self.job_entity: (self.start_job, COOLDOWN_S),
         }
         self.busy = set()
@@ -224,6 +225,11 @@ class Remote:
             # niri powers monitors back on at the first input.
             self.screen_off = False
             self.poll_now.set()
+            asyncio.create_task(self.ask_unlock())
+
+    async def ask_unlock(self):
+        if (await asyncio.to_thread(noctalia_status)).get("locked"):
+            self.to_auth.put_nowait({"type": "lockscreen"})
 
     # ---- actions (run in a worker thread)
 
@@ -268,6 +274,9 @@ class Remote:
 
     def next_track(self):
         run("playerctl", "-p", self.player, "next")
+
+    def pause_music(self):
+        run("playerctl", "-a", "pause")
 
     def job_active(self):
         if not self.job_unit:
@@ -436,6 +445,8 @@ class Remote:
                         msg = json.loads(line)
                         if msg.get("type") == "polkit":
                             asyncio.create_task(asyncio.to_thread(self.polkit_panel, bool(msg.get("submit"))))
+                        elif msg.get("type") == "unlock":
+                            asyncio.create_task(asyncio.to_thread(self.unlock))
                 finally:
                     sender.cancel()
                     writer.close()

@@ -253,6 +253,15 @@ class Auth:
                 os.kill(request.app, signal.SIGINT)
         elif request.kind == "polkit" and self.agent:
             self.agent.write(json.dumps({"type": "polkit", "submit": approved}).encode() + b"\n")
+        elif request.kind == "lockscreen" and approved and self.agent:
+            self.agent.write(b'{"type": "unlock"}\n')
+
+    async def ask_lockscreen(self):
+        uid = self.user.pw_uid
+        app = next((int(p.name) for p in Path("/proc").iterdir()
+                    if p.name.isdigit() and proc_stat(p.name)[0] == "noctalia" and p.stat().st_uid == uid), None)
+        if app and app not in self.requests and self.connected and time.monotonic() >= self.hold_until:
+            await self.ask("lockscreen", "unlock the screen", app)
 
     def abandon(self):
         for request in self.requests.values():
@@ -273,6 +282,8 @@ class Auth:
                     if req.get("active") and time.monotonic() >= self.hold_until:
                         # Input at the laptop: drop a blocking phone wait so the password prompt returns.
                         self.abandon()
+                elif req.get("type") == "lockscreen" and owner:
+                    asyncio.create_task(self.ask_lockscreen())
                 elif req.get("type") == "hold" and owner:
                     self.hold_until = time.monotonic() + min(float(req.get("s", 0)), HOLD_MAX_S)
                 elif req.get("type") == "auth":

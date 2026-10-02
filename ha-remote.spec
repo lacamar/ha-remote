@@ -1,4 +1,4 @@
-%global tag 0.2.5
+%global tag 0.2.6
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,11 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.6-1
+- Pause music button
+- README: NuPhy sync is wired only
+- Lock screen input asks the phone
+
 * Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.5-1
 - Mirror keyboard backlight to NuPhy keyboards
 - udev access to NuPhy vendor HID interface

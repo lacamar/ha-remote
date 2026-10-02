@@ -6,8 +6,6 @@ import sys
 
 stage = sys.argv[1] if len(sys.argv) > 1 else "finish"
 typed = stage == "finish" and bool(sys.stdin.read().strip("\0\n"))
-if typed and os.environ.get("PAM_SERVICE") == "login":
-    sys.exit(1)
 try:
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(300)

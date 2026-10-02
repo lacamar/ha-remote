@@ -21,7 +21,7 @@ The agent connects out to HA over WebSocket, so it needs no broker and no inboun
 5. `systemctl --user enable --now ha-remote`
 6. For Apple Home, add `input_button` and `input_boolean` to the domains your HomeKit Bridge exposes.
 
-A NuPhy keyboard (NuPhy IO models, wired or 2.4 GHz dongle) follows the laptop's keyboard
+A NuPhy keyboard (NuPhy IO models, wired only) follows the laptop's keyboard
 backlight; the packaged udev rule opens only its vendor HID interface to the seat user.
 
 ## Phone approval
@@ -35,8 +35,9 @@ backlight; the packaged udev rule opens only its vendor HID interface to the sea
 password prompt stays open: approving submits the prompt for you, typing the password cancels the
 request. ssh sessions and other users are never approved.
 
-For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. Submitting
-it empty, or the Unlock button, waits for the phone; a typed password unlocks as usual.
+For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. Touching
+the keyboard or mouse there asks the phone, and approving unlocks. Submitting it empty, or the
+Unlock button, waits for the phone; a typed password unlocks as usual and clears the request.
 
 The root service holds its own token and checks that every tap came from the approver's HA user
 with a one-time code. The token must not belong to the approver, or anything holding it could

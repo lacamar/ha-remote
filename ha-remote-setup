@@ -18,7 +18,7 @@ TOKEN = secret("token")
 TOGGLES = {"job": ("Job", "mdi:package-variant-closed")}
 BUTTONS = {"lock": ("Lock", "mdi:lock"), "unlock": ("Unlock", "mdi:lock-open-variant"),
            "suspend": ("Suspend", "mdi:power-sleep"), "power_off": ("Power off", "mdi:power"),
-           "next_track": ("Next track", "mdi:skip-next")}
+           "next_track": ("Next track", "mdi:skip-next"), "pause_music": ("Pause music", "mdi:pause")}
 
 
 def e(domain, obj):
