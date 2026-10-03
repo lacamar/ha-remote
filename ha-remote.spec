@@ -1,4 +1,4 @@
-%global tag 0.2.7
+%global tag 0.2.8
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.8-1
+- HomeKit lock replaces Lock/Unlock toggles
+- Drop Pause music, music off covers it
+
 * Fri Oct 02 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.7-1
 - Pause every MPRIS player, music off included
 - Momentary controls back to input_boolean, reset at once

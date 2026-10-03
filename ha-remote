@@ -189,12 +189,9 @@ class Remote:
         self.job_entity = e("input_boolean", "job")
         # entity -> (handler, cooldown seconds)
         self.actions = {
-            e("input_boolean", "lock"): (self.lock, COOLDOWN_S),
-            e("input_boolean", "unlock"): (self.unlock, COOLDOWN_S),
             e("input_boolean", "suspend"): (self.suspend, COOLDOWN_S),
             e("input_boolean", "power_off"): (self.power_off, 1),
             e("input_boolean", "next_track"): (self.next_track, 1),
-            e("input_boolean", "pause_music"): (self.pause_music, 1),
             self.job_entity: (self.start_job, COOLDOWN_S),
         }
         self.busy = set()
@@ -204,6 +201,7 @@ class Remote:
         self.job_was_active = False
         self.job_cancelled = False
         self.screen_off = False
+        self.unlocking_until = 0.0
         self.last_level = {"screen": 70, "keyboard": 50}
         self.active = True
         self.to_auth = asyncio.Queue()
@@ -251,6 +249,8 @@ class Remote:
         log.info("unlock: submitting the lock screen for phone approval")
         # Our own keystrokes must not count as someone at the keyboard.
         self.loop.call_soon_threadsafe(self.to_auth.put_nowait, {"type": "hold", "s": UNLOCK_HOLD_S})
+        self.unlocking_until = time.monotonic() + UNLOCK_HOLD_S
+        self.loop.call_soon_threadsafe(self.poll_now.set)
         run("niri", "msg", "action", "power-on-monitors")
         self.screen_off = False
         time.sleep(0.5)
@@ -301,6 +301,8 @@ class Remote:
         run("systemctl", "--user", "stop", "--no-block", self.job_unit)
 
     def command(self, target, cmd, pct):
+        if target == "session":
+            return self.lock() if cmd == "lock" else self.unlock()
         if target == "music":
             if cmd == "off":
                 return self.pause_music()
@@ -488,7 +490,8 @@ class Remote:
         name = self.name
         # device_class lock: on = unlocked
         await self.post_state(self.locked_entity, "off" if s["locked"] else "on",
-                              friendly_name=f"{name} locked", device_class="lock", icon="mdi:monitor-lock")
+                              friendly_name=f"{name} locked", device_class="lock", icon="mdi:monitor-lock",
+                              unlocking=bool(s["locked"]) and time.monotonic() < self.unlocking_until)
         await self.post_state(f"binary_sensor.{self.prefix}_active", "off" if s["locked"] or self.idle.idle else "on",
                               friendly_name=f"{name} in use", device_class="occupancy")
         if "plugged" in s:
