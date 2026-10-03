@@ -19,9 +19,8 @@ The agent connects out to HA over WebSocket, so it needs no broker and no inboun
 3. `cp /usr/share/ha-remote/config.example.toml ~/.config/ha-remote/config.toml` and edit it.
 4. `ha-remote-setup` creates the helpers, template entities, automations and a dashboard in HA.
 5. `systemctl --user enable --now ha-remote`
-6. For Apple Home, add `input_boolean` to the domains your HomeKit Bridge exposes. HA only pairs
-   locks on their own: add another HomeKit Bridge with just the Lock domain, pair the `Lock`
-   accessory it creates, then delete that extra bridge.
+6. For Apple Home, add `input_boolean` to the domains your HomeKit Bridge exposes. The Lock is its
+   own HomeKit accessory: pair it with the code setup leaves in HA's notifications.
 
 A NuPhy keyboard (NuPhy IO models, wired only) follows the laptop's keyboard
 backlight; the packaged udev rule opens only its vendor HID interface to the seat user.

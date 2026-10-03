@@ -1,4 +1,4 @@
-%global tag 0.2.9
+%global tag 0.2.10
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.10-1
+- Setup pairs the HomeKit lock
+- NuPhy: skip the dongle
+
 * Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.9-1
 - README: pairing the HomeKit lock
 

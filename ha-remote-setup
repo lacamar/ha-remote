@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -136,6 +137,27 @@ def automations():
         "actions": [{"action": "lock.lock", "target": {"entity_id": e("lock", "session")}}]}))
 
 
+def homekit_entries():
+    return {x["entry_id"]: x["title"] for x in call("GET", "/api/config/config_entries/entry?domain=homekit")}
+
+
+def homekit_lock():
+    lock = e("lock", "session")
+    before = homekit_entries()
+    for entry_id in before:
+        options = call("GET", f"/api/diagnostics/config_entry/{entry_id}").get("data", {}).get("config-entry", {}).get("options", {})
+        if lock in options.get("filter", {}).get("include_entities", []):
+            return print("exists homekit", lock)
+    # HA only pairs locks as their own accessory, spawned by adding a bridge with the lock domain.
+    bridge = flow("homekit", {"include_domains": ["lock"]}, {})["result"]["entry_id"]
+    time.sleep(3)
+    name = call("GET", f"/api/states/{lock}")["attributes"]["friendly_name"]
+    for entry_id, title in homekit_entries().items():
+        if entry_id not in before and (entry_id == bridge or not title.startswith(f"{name}:")):
+            call("DELETE", f"/api/config/config_entries/entry/{entry_id}")
+    print("homekit", lock, "created; pair it with the code in HA's notifications")
+
+
 def dashboard():
     path = f"{PREFIX}-remote"
     if not any(d.get("url_path") == path for d in ws([{"type": "lovelace/dashboards/list"}])[0]["result"]):
@@ -155,8 +177,9 @@ def main():
     templates()
     names_and_area()
     automations()
+    homekit_lock()
     dashboard()
-    print(f"Done. Expose input_boolean in HA's HomeKit Bridge for the {NAME} switches; see the README for the Lock.")
+    print(f"Done. Expose input_boolean in HA's HomeKit Bridge for the {NAME} switches.")
 
 
 if __name__ == "__main__":

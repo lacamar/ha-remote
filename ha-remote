@@ -100,7 +100,10 @@ def nuphy_xfer(fd, report):
 
 def nuphy_set(level):
     reached = False
+    # The dongle doesn't relay backlight commands to the keyboard.
     for path in glob.glob("/dev/input/by-id/usb-NuPhy*-if03-hidraw"):
+        if "Dongle" in path:
+            continue
         try:
             fd = os.open(path, os.O_RDWR)
         except OSError:
@@ -109,9 +112,7 @@ def nuphy_set(level):
             key = nuphy_xfer(fd, [0x55, 0xee, 0, 0, 0, 0, 0, 0, *os.urandom(56)])[4]
             frame = lambda cmd, *fields: [0x55, cmd, 0, 0, *(b ^ key for b in fields)] + [0] * (60 - len(fields))
             apply = frame(0xd5, 0x11, 0, 0, 0)
-            # A dongle whose keyboard is on another link answers with zeros.
-            if nuphy_xfer(fd, apply)[4] ^ key != 0x11:
-                continue
+            nuphy_xfer(fd, apply)
             nuphy_xfer(fd, frame(0xd6, 1, 1, 0, 1, level))
             nuphy_xfer(fd, apply)
             reached = True
