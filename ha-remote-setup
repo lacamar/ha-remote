@@ -156,7 +156,7 @@ def main():
     names_and_area()
     automations()
     dashboard()
-    print(f"Done. Expose the input_boolean and lock domains in HA's HomeKit Bridge to get the {NAME} switches in Apple Home.")
+    print(f"Done. Expose input_boolean in HA's HomeKit Bridge for the {NAME} switches; see the README for the Lock.")
 
 
 if __name__ == "__main__":

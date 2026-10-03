@@ -1,4 +1,4 @@
-%global tag 0.2.8
+%global tag 0.2.9
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,9 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.9-1
+- README: pairing the HomeKit lock
+
 * Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.8-1
 - HomeKit lock replaces Lock/Unlock toggles
 - Drop Pause music, music off covers it
