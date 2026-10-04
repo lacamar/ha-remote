@@ -1,4 +1,4 @@
-%global tag 0.2.10
+%global tag 0.2.11
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,11 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Sun Oct 04 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.11-1
+- Approve polkit while locked
+- Never type into the lock screen
+- List all pending pkexec commands
+
 * Sat Oct 03 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.10-1
 - Setup pairs the HomeKit lock
 - NuPhy: skip the dongle

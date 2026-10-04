@@ -34,7 +34,8 @@ backlight; the packaged udev rule opens only its vendor HID interface to the sea
 `enable` puts `pam_exec` in front of the password for `sudo`, `sudo-i`, `polkit-1` and `login`
 (`disable` undoes it). A sudo or polkit prompt pushes Approve and Deny to the phone while the
 password prompt stays open: approving submits the prompt for you, typing the password cancels the
-request. ssh sessions and other users are never approved.
+request. While the screen is locked, approving a polkit prompt authenticates it directly. ssh
+sessions and other users are never approved.
 
 For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. Touching
 the keyboard or mouse there asks the phone, and approving unlocks. Submitting it empty, or

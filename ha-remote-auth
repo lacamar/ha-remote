@@ -40,7 +40,9 @@ def pam_lines(service):
         return [finish]
     # noctalia's polkit panel does not make room for an info line.
     options = "seteuid stdout" if service.startswith("sudo") else "seteuid"
-    return [f"auth       optional     pam_exec.so quiet {options} {HELPER} start\n", finish]
+    # polkit's start can answer for the phone while the screen is locked.
+    control = "sufficient" if service == "polkit-1" else "optional"
+    return [f"auth       {control:<13}pam_exec.so quiet {options} {HELPER} start\n", finish]
 
 
 def enable():
@@ -96,9 +98,9 @@ def args(pid):
         return ""
 
 
-def pkexec_command():
+def pkexec_commands():
     pids = (p.name for p in Path("/proc").iterdir() if p.name.isdigit())
-    return next((a for pid in pids if proc_stat(pid)[0] == "pkexec" and (a := args(pid))), None)
+    return " or ".join(a for pid in pids if proc_stat(pid)[0] == "pkexec" and (a := args(pid)))
 
 
 def tty_of(pid):
@@ -136,6 +138,7 @@ class Auth:
         self.hold_until = 0.0
         self.requests = {}
         self.agent = None
+        self.locked = False
         self.connected = False
         self.session = None
 
@@ -151,7 +154,7 @@ class Auth:
         if uid == 0 and service in ("sudo", "sudo-i") and app_comm == "sudo":
             return "sudo", (args(app) or "a shell")[:120], app
         if uid == 0 and service == "polkit-1":
-            return "polkit", (pkexec_command() or "a system action")[:120], app
+            return "polkit", (pkexec_commands() or "a system action")[:120], app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
             return "lockscreen", "unlock the screen", app
         return None
@@ -201,15 +204,19 @@ class Auth:
     def approved(self, request):
         return request.verdict.done() and not request.verdict.cancelled() and request.verdict.result()
 
-    async def start(self, pid, uid, req, writer):
+    async def start(self, pid, uid, req, reader, writer):
         prompt = self.describe(pid, uid, req)
         if not prompt or not self.connected:
             return False
         kind, what, app = prompt
-        if app not in self.requests and not await self.ask(kind, what, app):
+        if not (request := self.requests.get(app) or await self.ask(kind, what, app)):
             return False
         writer.write(b'{"asking": true}\n')
-        return True
+        # The lock screen covers the polkit panel, so nothing could submit it.
+        if kind == "polkit" and self.locked:
+            await writer.drain()
+            return await self.wait(request, reader)
+        return False
 
     async def finish(self, pid, uid, req, reader, writer):
         prompt = self.describe(pid, uid, req)
@@ -228,6 +235,9 @@ class Auth:
                 return False
             writer.write(b'{"asking": true}\n')
             await writer.drain()
+        return await self.wait(request, reader)
+
+    async def wait(self, request, reader):
         request.blocking = True
         gone = asyncio.ensure_future(reader.read(1))
         await asyncio.wait({request.verdict, gone}, return_when=asyncio.FIRST_COMPLETED)
@@ -284,11 +294,13 @@ class Auth:
                         self.abandon()
                 elif req.get("type") == "lockscreen" and owner:
                     asyncio.create_task(self.ask_lockscreen())
+                elif req.get("type") == "locked" and owner:
+                    self.locked = bool(req.get("locked"))
                 elif req.get("type") == "hold" and owner:
                     self.hold_until = time.monotonic() + min(float(req.get("s", 0)), HOLD_MAX_S)
                 elif req.get("type") == "auth":
                     if req.get("stage") == "start":
-                        ok = await self.start(pid, uid, req, writer)
+                        ok = await self.start(pid, uid, req, reader, writer)
                     else:
                         ok = await self.finish(pid, uid, req, reader, writer)
                     writer.write(json.dumps({"ok": ok}).encode() + b"\n")
@@ -299,6 +311,7 @@ class Auth:
         finally:
             if self.agent is writer:
                 self.agent = None
+                self.locked = False
             writer.close()
 
     def on_action(self, event):

@@ -205,6 +205,7 @@ class Remote:
         self.unlocking_until = 0.0
         self.last_level = {"screen": 70, "keyboard": 50}
         self.active = True
+        self.locked = False
         self.to_auth = asyncio.Queue()
         self.sent = {}
         self.session = None
@@ -428,7 +429,9 @@ class Remote:
                     queue.put_nowait(data["event"]["data"])
 
     def polkit_panel(self, submit):
-        if noctalia_status().get("activePanelId") != "polkit":
+        status = noctalia_status()
+        # Keys would go to the lock screen instead.
+        if status.get("locked") or status.get("activePanelId") != "polkit":
             return
         if submit:
             # The panel ignores an empty submit; the approval is what authenticates, not this text.
@@ -448,6 +451,7 @@ class Remote:
                 while not self.to_auth.empty():
                     self.to_auth.get_nowait()
                 self.to_auth.put_nowait({"type": "presence", "active": self.active})
+                self.to_auth.put_nowait({"type": "locked", "locked": self.locked})
                 sender = asyncio.create_task(self.auth_send(writer))
                 try:
                     async for line in reader:
@@ -483,6 +487,9 @@ class Remote:
 
     async def publish(self):
         s = await asyncio.to_thread(self.snapshot)
+        if bool(s["locked"]) != self.locked:
+            self.locked = bool(s["locked"])
+            self.to_auth.put_nowait({"type": "locked", "locked": self.locked})
         if not s["locked"]:
             await asyncio.to_thread(kbd_restore)
         for target in ("screen", "keyboard"):
