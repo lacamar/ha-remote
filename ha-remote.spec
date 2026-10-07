@@ -1,4 +1,4 @@
-%global tag 0.2.11
+%global tag 0.2.12
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,9 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Oct 07 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.12-1
+- Approve sudo on a VT console
+
 * Sun Oct 04 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.11-1
 - Approve polkit while locked
 - Never type into the lock screen

@@ -106,7 +106,11 @@ def pkexec_commands():
 def tty_of(pid):
     nr = proc_stat(pid)[2]
     major, minor = (nr >> 8) & 0xFFF, (nr & 0xFF) | ((nr >> 12) & 0xFFF00)
-    return f"/dev/pts/{minor}" if major == 136 else None
+    if major == 136:
+        return f"/dev/pts/{minor}"
+    if major == 4 and 0 < minor < 64:
+        return f"/dev/tty{minor}"
+    return None
 
 
 def press_enter(tty):
