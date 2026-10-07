@@ -124,7 +124,7 @@ def press_enter(tty):
 class Request:
     def __init__(self, kind, what, app):
         self.kind, self.what, self.app = kind, what, app
-        self.tty = tty_of(app) if kind == "sudo" else None
+        self.tty = tty_of(app) if kind in ("sudo", "polkit") else None
         self.nonce = secrets.token_hex(16)
         self.verdict = asyncio.get_running_loop().create_future()
         self.blocking = False
@@ -158,7 +158,8 @@ class Auth:
         if uid == 0 and service in ("sudo", "sudo-i") and app_comm == "sudo":
             return "sudo", (args(app) or "a shell")[:120], app
         if uid == 0 and service == "polkit-1":
-            return "polkit", (pkexec_commands() or "a system action")[:120], app
+            caller = next((f"{comm} {args(pid)}" for (_, child), (pid, comm) in zip(chain, chain[1:]) if child == "pkttyagent"), None)
+            return "polkit", (pkexec_commands() or caller or "a system action")[:120], app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
             return "lockscreen", "unlock the screen", app
         return None
@@ -260,7 +261,7 @@ class Auth:
         if request.blocking or proc_stat(request.app)[0] is None:
             return
         approved = self.approved(request)
-        if request.kind == "sudo":
+        if request.kind == "sudo" or request.tty:
             if approved and request.tty:
                 press_enter(request.tty)
             elif not approved:

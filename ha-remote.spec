@@ -1,4 +1,4 @@
-%global tag 0.2.12
+%global tag 0.2.13
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Oct 07 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.13-1
+- Approve polkit text prompts
+- Show the polkit caller's command
+
 * Wed Oct 07 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.12-1
 - Approve sudo on a VT console
 
