@@ -161,7 +161,8 @@ class Auth:
             caller = next((f"{comm} {args(pid)}" for (_, child), (pid, comm) in zip(chain, chain[1:]) if child == "pkttyagent"), None)
             return "polkit", (pkexec_commands() or caller or "a system action")[:120], app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
-            return "lockscreen", "unlock the screen", app
+            # PAM runs in a forked child; key by the main process like ask_lockscreen.
+            return "lockscreen", "unlock the screen", next(p for p, comm in reversed(chain) if comm == "noctalia")
         return None
 
     async def service(self, domain, name, data):
@@ -274,7 +275,7 @@ class Auth:
     async def ask_lockscreen(self):
         uid = self.user.pw_uid
         app = next((int(p.name) for p in Path("/proc").iterdir()
-                    if p.name.isdigit() and proc_stat(p.name)[0] == "noctalia" and p.stat().st_uid == uid), None)
+                    if p.name.isdigit() and proc_stat(p.name)[0] == "noctalia" and p.stat().st_uid == uid and not args(p.name)), None)
         if app and app not in self.requests and self.connected and time.monotonic() >= self.hold_until:
             await self.ask("lockscreen", "unlock the screen", app)
 

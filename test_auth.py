@@ -41,5 +41,12 @@ async def main():
     assert not await start(True, lambda a, r: a.abandon())
 
 
+def lockscreen_key():
+    a = auth.Auth({"url": "", "token": "", "notify_service": "", "approver_user_id": "", "user": "root"})
+    auth.ancestors = lambda pid: [(9, "pam-helper"), (8, "noctalia"), (7, "noctalia"), (2, "systemd")]
+    assert a.describe(9, 0, {"user": "root", "service": "login"})[2] == 7
+
+
+lockscreen_key()
 asyncio.run(main())
 print("ok")

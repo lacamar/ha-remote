@@ -1,4 +1,4 @@
-%global tag 0.2.13
+%global tag 0.2.14
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,9 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Thu Oct 08 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.14-1
+- Fix lock screen re-asking after approval
+
 * Wed Oct 07 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.13-1
 - Approve polkit text prompts
 - Show the polkit caller's command
