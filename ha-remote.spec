@@ -1,4 +1,4 @@
-%global tag 0.2.15
+%global tag 0.2.16
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.16-1
+- Approve by tapping the notification
+- Show the command in the tap confirmation
+
 * Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.15-1
 - Send approvals as time-sensitive
 - Re-send approval when tapped

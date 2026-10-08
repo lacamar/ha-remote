@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 import asyncio
 import fcntl
+import itertools
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import termios
 import time
 import tomllib
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
@@ -128,6 +130,7 @@ class Request:
         self.nonce = secrets.token_hex(16)
         self.verdict = asyncio.get_running_loop().create_future()
         self.blocking = False
+        self.sub = None
 
 
 class Auth:
@@ -144,6 +147,8 @@ class Auth:
         self.agent = None
         self.locked = False
         self.connected = False
+        self.ws = None
+        self.ids = itertools.count(3)
         self.session = None
 
     def describe(self, pid, uid, req):
@@ -173,33 +178,28 @@ class Auth:
     def tag(self, request):
         return f"ha-remote-{request.nonce[:8]}"
 
-    async def notify(self, request):
-        await self.service("notify", self.notify_service, {
-            "title": f"{self.name}: {request.kind}", "message": request.what, "data": {
-                "tag": self.tag(request), "push": {"interruption-level": "time-sensitive"},
-                # iOS drops a tapped notification; this makes the tap re-send it.
-                "url": f"homeassistant://fire_event/mobile_app_notification_action?action=HAREMOTE_TAP_{request.nonce}",
-                "actions": [
-                    {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
-                    {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
-
     async def ask(self, kind, what, app):
         request = self.requests[app] = Request(kind, what, app)
         log.info("asking approval for %s: %s", kind, what)
+        # The app's tap confirmation only shows the event name; HA caps it at 64.
+        event = f"{kind}: {what}"[:64]
         try:
-            await self.notify(request)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if self.ws:
+                request.sub = next(self.ids)
+                await self.ws.send_json({"id": request.sub, "type": "subscribe_events", "event_type": event})
+            await self.service("notify", self.notify_service, {
+                "title": f"{self.name}: {kind}", "message": what, "data": {
+                    "tag": self.tag(request), "push": {"interruption-level": "time-sensitive"},
+                    "url": f"homeassistant://x-callback-url/fire_event?{urlencode({'eventName': event, 'action': f'HAREMOTE_APPROVE_{request.nonce}'}, quote_via=quote)}",
+                    "actions": [
+                        {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
+                        {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
             log.warning("notify failed: %s", e)
             await self.drop(request)
             return None
         asyncio.create_task(self.expire(request))
         return request
-
-    async def renotify(self, request):
-        try:
-            await self.notify(request)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.warning("notify failed: %s", e)
 
     async def drop(self, request):
         if self.requests.get(request.app) is not request:
@@ -208,8 +208,10 @@ class Auth:
         if not request.verdict.done():
             request.verdict.cancel()
         try:
+            if self.ws and request.sub:
+                await self.ws.send_json({"id": next(self.ids), "type": "unsubscribe_events", "subscription": request.sub})
             await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": self.tag(request)}})
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError):
             pass
 
     async def expire(self, request):
@@ -336,13 +338,11 @@ class Auth:
     def on_action(self, event):
         verb, _, nonce = event["data"].get("action", "").rpartition("_")
         request = next((r for r in self.requests.values() if secrets.compare_digest(r.nonce, nonce)), None)
-        if request is None or request.verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY", "HAREMOTE_TAP"):
+        if request is None or request.verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY"):
             return
         user_id = (event.get("context") or {}).get("user_id")
         if user_id != self.approver:
             return log.warning("ignoring %s from user %s", verb, user_id)
-        if verb == "HAREMOTE_TAP":
-            return asyncio.create_task(self.renotify(request))
         request.verdict.set_result(verb == "HAREMOTE_APPROVE")
         self.submit(request)
 
@@ -358,7 +358,7 @@ class Auth:
             await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
             if not (await ws.receive_json()).get("success"):
                 raise SystemExit("subscribe failed")
-            self.connected = True
+            self.connected, self.ws = True, ws
             log.info("connected")
             try:
                 async for msg in ws:
@@ -368,7 +368,7 @@ class Auth:
                     if data.get("type") == "event":
                         self.on_action(data["event"])
             finally:
-                self.connected = False
+                self.connected, self.ws = False, None
 
     async def run(self):
         SOCKET.unlink(missing_ok=True)

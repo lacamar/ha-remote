@@ -33,15 +33,8 @@ async def start(locked, verdict):
     return await task
 
 
-def tap_then_approve(a, r):
-    a.on_action({"data": {"action": f"HAREMOTE_TAP_{r.nonce}"}, "context": {"user_id": ""}})
-    assert not r.verdict.done()
-    r.verdict.set_result(True)
-
-
 async def main():
     approve = lambda a, r: r.verdict.set_result(True)
-    assert await start(True, tap_then_approve) is True
     assert await start(False, approve) is False
     assert await start(True, approve) is True
     assert not await start(True, lambda a, r: r.verdict.set_result(False))
