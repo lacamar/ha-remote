@@ -173,20 +173,33 @@ class Auth:
     def tag(self, request):
         return f"ha-remote-{request.nonce[:8]}"
 
+    async def notify(self, request):
+        await self.service("notify", self.notify_service, {
+            "title": f"{self.name}: {request.kind}", "message": request.what, "data": {
+                "tag": self.tag(request), "push": {"interruption-level": "time-sensitive"},
+                # iOS drops a tapped notification; this makes the tap re-send it.
+                "url": f"homeassistant://fire_event/mobile_app_notification_action?action=HAREMOTE_TAP_{request.nonce}",
+                "actions": [
+                    {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
+                    {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
+
     async def ask(self, kind, what, app):
         request = self.requests[app] = Request(kind, what, app)
         log.info("asking approval for %s: %s", kind, what)
         try:
-            await self.service("notify", self.notify_service, {
-                "title": f"{self.name}: {kind}", "message": what, "data": {"tag": self.tag(request), "actions": [
-                    {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
-                    {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
+            await self.notify(request)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.warning("notify failed: %s", e)
             await self.drop(request)
             return None
         asyncio.create_task(self.expire(request))
         return request
+
+    async def renotify(self, request):
+        try:
+            await self.notify(request)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.warning("notify failed: %s", e)
 
     async def drop(self, request):
         if self.requests.get(request.app) is not request:
@@ -323,11 +336,13 @@ class Auth:
     def on_action(self, event):
         verb, _, nonce = event["data"].get("action", "").rpartition("_")
         request = next((r for r in self.requests.values() if secrets.compare_digest(r.nonce, nonce)), None)
-        if request is None or request.verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY"):
+        if request is None or request.verdict.done() or verb not in ("HAREMOTE_APPROVE", "HAREMOTE_DENY", "HAREMOTE_TAP"):
             return
         user_id = (event.get("context") or {}).get("user_id")
         if user_id != self.approver:
             return log.warning("ignoring %s from user %s", verb, user_id)
+        if verb == "HAREMOTE_TAP":
+            return asyncio.create_task(self.renotify(request))
         request.verdict.set_result(verb == "HAREMOTE_APPROVE")
         self.submit(request)
 

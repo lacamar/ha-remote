@@ -1,4 +1,4 @@
-%global tag 0.2.14
+%global tag 0.2.15
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.15-1
+- Send approvals as time-sensitive
+- Re-send approval when tapped
+
 * Thu Oct 08 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.14-1
 - Fix lock screen re-asking after approval
 
