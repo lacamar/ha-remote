@@ -22,6 +22,7 @@ import aiohttp
 log = logging.getLogger("ha-remote-auth")
 
 CONFIG_PATH = Path("/etc/ha-remote/auth.toml")
+DENY_EVENT = "Deny"
 SOCKET = Path("/run/ha-remote/auth.sock")
 HELPER = "/usr/libexec/ha-remote/pam-helper"
 PAM_SERVICES = ("sudo", "sudo-i", "polkit-1", "login")
@@ -148,7 +149,7 @@ class Auth:
         self.locked = False
         self.connected = False
         self.ws = None
-        self.ids = itertools.count(3)
+        self.ids = itertools.count(4)
         self.session = None
 
     def describe(self, pid, uid, req):
@@ -178,6 +179,10 @@ class Auth:
     def tag(self, request):
         return f"ha-remote-{request.nonce[:8]}"
 
+    def fire_url(self, event, action, cancel=None):
+        params = {"eventName": event, "action": action} | ({"x-cancel": cancel} if cancel else {})
+        return f"homeassistant://x-callback-url/fire_event?{urlencode(params, quote_via=quote)}"
+
     async def ask(self, kind, what, app):
         request = self.requests[app] = Request(kind, what, app)
         log.info("asking approval for %s: %s", kind, what)
@@ -190,7 +195,7 @@ class Auth:
             await self.service("notify", self.notify_service, {
                 "title": f"{self.name}: {kind}", "message": what, "data": {
                     "tag": self.tag(request), "push": {"interruption-level": "time-sensitive"},
-                    "url": f"homeassistant://x-callback-url/fire_event?{urlencode({'eventName': event, 'action': f'HAREMOTE_APPROVE_{request.nonce}'}, quote_via=quote)}",
+                    "url": self.fire_url(event, f"HAREMOTE_APPROVE_{request.nonce}", self.fire_url(DENY_EVENT, f"HAREMOTE_DENY_{request.nonce}")),
                     "actions": [
                         {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
                         {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
@@ -274,9 +279,12 @@ class Auth:
     def submit(self, request):
         # Answer the open password prompt; finish sees the verdict.
         self.log_verdict(request)
-        if request.blocking or proc_stat(request.app)[0] is None:
+        if proc_stat(request.app)[0] is None:
             return
         approved = self.approved(request)
+        # A blocking wait already answers PAM; a denial must still dismiss the prompt.
+        if approved and request.blocking:
+            return
         if request.kind == "sudo" or request.tty:
             if approved and request.tty:
                 press_enter(request.tty)
@@ -356,7 +364,8 @@ class Auth:
             if (await ws.receive_json())["result"]["id"] == self.approver:
                 raise SystemExit("token belongs to the approver; use a token of a separate HA user")
             await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
-            if not (await ws.receive_json()).get("success"):
+            await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": DENY_EVENT})
+            if not all([(await ws.receive_json()).get("success") for _ in range(2)]):
                 raise SystemExit("subscribe failed")
             self.connected, self.ws = True, ws
             log.info("connected")

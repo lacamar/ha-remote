@@ -39,6 +39,14 @@ async def main():
     assert await start(True, approve) is True
     assert not await start(True, lambda a, r: r.verdict.set_result(False))
     assert not await start(True, lambda a, r: a.abandon())
+    assert not await start(True, deny_while_blocking)
+
+
+def deny_while_blocking(a, r):
+    sent = []
+    a.agent = type("Agent", (), {"write": lambda self, data: sent.append(data)})()
+    a.on_action({"data": {"action": f"HAREMOTE_DENY_{r.nonce}"}, "context": {"user_id": ""}})
+    assert sent == [b'{"type": "polkit", "submit": false}\n']
 
 
 def lockscreen_key():

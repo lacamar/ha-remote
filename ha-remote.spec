@@ -1,4 +1,4 @@
-%global tag 0.2.16
+%global tag 0.2.17
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.17-1
+- Dismiss the prompt on deny
+- Deny by cancelling the tap confirmation
+
 * Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.16-1
 - Approve by tapping the notification
 - Show the command in the tap confirmation
