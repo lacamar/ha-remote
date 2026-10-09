@@ -1,11 +1,13 @@
 #!/usr/bin/python3 -I
 import asyncio
 import fcntl
+import ipaddress
 import itertools
 import json
 import logging
 import os
 import pwd
+import re
 import secrets
 import signal
 import socket
@@ -24,9 +26,12 @@ log = logging.getLogger("ha-remote-auth")
 CONFIG_PATH = Path("/etc/ha-remote/auth.toml")
 DENY_EVENT = "Deny"
 SOCKET = Path("/run/ha-remote/auth.sock")
+PENDING = Path("/var/lib/ha-remote/pending")
 HELPER = "/usr/libexec/ha-remote/pam-helper"
 PAM_SERVICES = ("sudo", "sudo-i", "polkit-1", "login")
 HOLD_MAX_S = 60
+RATE_LIMIT = 5
+RATE_WINDOW_S = 60
 
 
 def pam_files():
@@ -116,6 +121,31 @@ def tty_of(pid):
     return None
 
 
+def tcp_addr(field):
+    raw = bytes.fromhex(field.split(":")[0])
+    ip = ipaddress.ip_address(b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4)))
+    return getattr(ip, "ipv4_mapped", None) or ip
+
+
+def ssh_peer(pid):
+    try:
+        inodes = {os.readlink(f"/proc/{pid}/fd/{fd}")[8:-1] for fd in os.listdir(f"/proc/{pid}/fd")}
+        for name in ("tcp", "tcp6"):
+            for line in Path(f"/proc/{pid}/net/{name}").read_text().splitlines()[1:]:
+                f = line.split()
+                if f[9] in inodes and f[3] == "01":
+                    return tcp_addr(f[2])
+    except OSError:
+        pass
+    return None
+
+
+def sd_notify(msg):
+    if addr := os.environ.get("NOTIFY_SOCKET"):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.sendto(msg, "\0" + addr[1:] if addr[0] == "@" else addr)
+
+
 def press_enter(tty):
     fd = os.open(tty, os.O_RDWR | os.O_NOCTTY)
     try:
@@ -131,6 +161,7 @@ class Request:
         self.nonce = secrets.token_hex(16)
         self.verdict = asyncio.get_running_loop().create_future()
         self.blocking = False
+        self.event = None
         self.sub = None
 
 
@@ -143,6 +174,15 @@ class Auth:
         self.user = pwd.getpwnam(cfg["user"])
         self.name = cfg.get("device_name", socket.gethostname().split(".")[0])
         self.timeout = cfg.get("timeout_s", 60)
+        policy = cfg.get("policy", {})
+        self.tap = set(policy.get("tap", ("sudo", "polkit", "lockscreen")))
+        self.never = [re.compile(p) for p in policy.get("never", [])]
+        self.ssh_from = [ipaddress.ip_network(n) for n in policy.get("ssh_from", [])]
+        self.asked = []
+        try:
+            self.stale = PENDING.read_text().split()
+        except OSError:
+            self.stale = []
         self.hold_until = 0.0
         self.requests = {}
         self.agent = None
@@ -157,15 +197,21 @@ class Auth:
             return None
         chain = ancestors(pid)
         comms = [comm for _, comm in chain]
-        if len(chain) < 2 or any(comm.startswith("sshd") for comm in comms):
+        if len(chain) < 2:
             return None
+        via = ""
+        if any(comm.startswith("sshd") for comm in comms):
+            peer = next(filter(None, (ssh_peer(p) for p, comm in chain if comm.startswith("sshd"))), None)
+            if not peer or not any(peer in net for net in self.ssh_from):
+                return None
+            via = f" (ssh from {peer})"
         app, app_comm = chain[1]
         service = req.get("service")
         if uid == 0 and service in ("sudo", "sudo-i") and app_comm == "sudo":
-            return "sudo", (args(app) or "a shell")[:120], app
+            return "sudo", (args(app) or "a shell")[:120] + via, app
         if uid == 0 and service == "polkit-1":
             caller = next((f"{comm} {args(pid)}" for (_, child), (pid, comm) in zip(chain, chain[1:]) if child == "pkttyagent"), None)
-            return "polkit", (pkexec_commands() or caller or "a system action")[:120], app
+            return "polkit", (pkexec_commands() or caller or "a system action")[:120] + via, app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
             # PAM runs in a forked child; key by the main process like ask_lockscreen.
             return "lockscreen", "unlock the screen", next(p for p, comm in reversed(chain) if comm == "noctalia")
@@ -183,22 +229,49 @@ class Auth:
         params = {"eventName": event, "action": action} | ({"x-cancel": cancel} if cancel else {})
         return f"homeassistant://x-callback-url/fire_event?{urlencode(params, quote_via=quote)}"
 
-    async def ask(self, kind, what, app):
-        request = self.requests[app] = Request(kind, what, app)
-        log.info("asking approval for %s: %s", kind, what)
-        # The app's tap confirmation only shows the event name; HA caps it at 64.
-        event = f"{kind}: {what}"[:64]
+    async def logbook(self, message):
         try:
-            if self.ws:
-                request.sub = next(self.ids)
-                await self.ws.send_json({"id": request.sub, "type": "subscribe_events", "event_type": event})
+            await self.service("logbook", "log", {"name": self.name, "message": message})
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
+    def save(self):
+        try:
+            PENDING.write_text("".join(f"{self.tag(r)}\n" for r in self.requests.values()))
+        except OSError:
+            pass
+
+    async def subscribe(self, request):
+        if self.ws and request.event:
+            request.sub = next(self.ids)
+            await self.ws.send_json({"id": request.sub, "type": "subscribe_events", "event_type": request.event})
+
+    async def ask(self, kind, what, app):
+        if any(p.search(f"{kind}: {what}") for p in self.never):
+            return log.info("policy: password only for %s: %s", kind, what)
+        now = time.monotonic()
+        self.asked = [t for t in self.asked if now - t < RATE_WINDOW_S]
+        if len(self.asked) >= RATE_LIMIT:
+            log.warning("rate limited %s: %s", kind, what)
+            asyncio.create_task(self.logbook(f"rate limited {kind}: {what}"))
+            return None
+        self.asked.append(now)
+        request = self.requests[app] = Request(kind, what, app)
+        self.save()
+        log.info("asking approval for %s: %s", kind, what)
+        approve, deny = f"HAREMOTE_APPROVE_{request.nonce}", f"HAREMOTE_DENY_{request.nonce}"
+        data = {"tag": self.tag(request), "push": {"interruption-level": "time-sensitive"}}
+        if kind in self.tap:
+            # The app's tap confirmation only shows the event name; HA caps it at 64.
+            request.event = f"{kind}: {what}"[:64]
+            data["url"] = self.fire_url(request.event, approve, self.fire_url(DENY_EVENT, deny))
+        try:
+            await self.subscribe(request)
             await self.service("notify", self.notify_service, {
-                "title": f"{self.name}: {kind}", "message": what, "data": {
-                    "tag": self.tag(request), "push": {"interruption-level": "time-sensitive"},
-                    "url": self.fire_url(event, f"HAREMOTE_APPROVE_{request.nonce}", self.fire_url(DENY_EVENT, f"HAREMOTE_DENY_{request.nonce}")),
+                "title": f"{self.name}: {kind}", "message": what, "data": data | {
                     "actions": [
-                        {"action": f"HAREMOTE_APPROVE_{request.nonce}", "title": "Approve", "authenticationRequired": True},
-                        {"action": f"HAREMOTE_DENY_{request.nonce}", "title": "Deny", "destructive": True}]}})
+                        {"action": approve, "title": "Approve", "authenticationRequired": True},
+                        {"action": deny, "title": "Deny", "destructive": True}]}})
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
             log.warning("notify failed: %s", e)
             await self.drop(request)
@@ -210,6 +283,7 @@ class Auth:
         if self.requests.get(request.app) is not request:
             return
         del self.requests[request.app]
+        self.save()
         if not request.verdict.done():
             request.verdict.cancel()
         try:
@@ -352,23 +426,39 @@ class Auth:
         if user_id != self.approver:
             return log.warning("ignoring %s from user %s", verb, user_id)
         request.verdict.set_result(verb == "HAREMOTE_APPROVE")
+        asyncio.create_task(self.logbook(f"{'approved' if request.verdict.result() else 'denied'} {request.kind}: {request.what}"))
         self.submit(request)
+
+    async def handshake(self, ws):
+        await ws.receive_json()
+        await ws.send_json({"type": "auth", "access_token": self.token})
+        if (await ws.receive_json()).get("type") != "auth_ok":
+            raise SystemExit("HA rejected the token")
+        await ws.send_json({"id": 1, "type": "auth/current_user"})
+        if (await ws.receive_json())["result"]["id"] == self.approver:
+            raise SystemExit("token belongs to the approver; use a token of a separate HA user")
+        await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
+        await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": DENY_EVENT})
+        if not all([(await ws.receive_json()).get("success") for _ in range(2)]):
+            raise SystemExit("subscribe failed; the token's HA user must be an admin")
+
+    async def on_connect(self):
+        stale, self.stale = self.stale, []
+        for tag in stale:
+            try:
+                await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": tag}})
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+        self.save()
+        for request in list(self.requests.values()):
+            await self.subscribe(request)
 
     async def listen(self):
         async with self.session.ws_connect(f"{self.url}/api/websocket", heartbeat=30) as ws:
-            await ws.receive_json()
-            await ws.send_json({"type": "auth", "access_token": self.token})
-            if (await ws.receive_json()).get("type") != "auth_ok":
-                raise SystemExit("HA rejected the token")
-            await ws.send_json({"id": 1, "type": "auth/current_user"})
-            if (await ws.receive_json())["result"]["id"] == self.approver:
-                raise SystemExit("token belongs to the approver; use a token of a separate HA user")
-            await ws.send_json({"id": 2, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})
-            await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": DENY_EVENT})
-            if not all([(await ws.receive_json()).get("success") for _ in range(2)]):
-                raise SystemExit("subscribe failed")
+            await self.handshake(ws)
             self.connected, self.ws = True, ws
             log.info("connected")
+            await self.on_connect()
             try:
                 async for msg in ws:
                     if msg.type != aiohttp.WSMsgType.TEXT:
@@ -379,10 +469,47 @@ class Auth:
             finally:
                 self.connected, self.ws = False, None
 
+    async def watchdog(self):
+        while True:
+            sd_notify(b"WATCHDOG=1")
+            await asyncio.sleep(10)
+
+    async def check(self):
+        failed = []
+
+        def report(ok, what):
+            print("ok  " if ok else "FAIL", what)
+            ok or failed.append(what)
+
+        for path, _ in pam_files():
+            text = path.read_text() if path.exists() else ""
+            report(all(line in text for line in pam_lines(path.name)), f"PAM {path}")
+        report(SOCKET.is_socket(), f"daemon socket {SOCKET}")
+        headers = {"Authorization": f"Bearer {self.token}"}
+        async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as self.session:
+            try:
+                async with self.session.ws_connect(f"{self.url}/api/websocket") as ws:
+                    try:
+                        await self.handshake(ws)
+                        report(True, "HA token, user and event subscriptions")
+                    except SystemExit as e:
+                        return report(False, str(e))
+                    await ws.send_json({"id": 4, "type": "config/auth/list"})
+                    users = (await ws.receive_json()).get("result") or []
+                    report(any(u["id"] == self.approver for u in users), f"approver user {self.approver}")
+                async with self.session.get(f"{self.url}/api/services") as r:
+                    services = {s["domain"]: s["services"] for s in await r.json()}
+                report(self.notify_service in services.get("notify", {}), f"notify.{self.notify_service}")
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                report(False, f"HA at {self.url}: {e}")
+        return not failed
+
     async def run(self):
         SOCKET.unlink(missing_ok=True)
         await asyncio.start_unix_server(self.handle, SOCKET)
         SOCKET.chmod(0o666)
+        sd_notify(b"READY=1")
+        asyncio.create_task(self.watchdog())
         headers = {"Authorization": f"Bearer {self.token}"}
         async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)) as self.session:
             delay = 1
@@ -405,6 +532,8 @@ def main():
         raise SystemExit(f"{CONFIG_PATH} holds a token: chmod 600 it")
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
+    if command == "check":
+        sys.exit(0 if asyncio.run(Auth(cfg).check()) else 1)
     asyncio.run(Auth(cfg).run())
 
 

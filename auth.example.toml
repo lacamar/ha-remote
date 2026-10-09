@@ -9,3 +9,11 @@ notify_service = "mobile_app_phone"
 # HA user of the phone app; only its notification taps approve.
 approver_user_id = "<ha user id>"
 timeout_s = 60
+
+[policy]
+# Kinds that approve by tapping the notification; the rest need the Face ID Approve button.
+tap = ["sudo", "polkit", "lockscreen"]
+# Regexes on "<kind>: <command>" that always ask for the password.
+never = ["^sudo: rm "]
+# Networks whose ssh sessions may be approved; none by default.
+ssh_from = []

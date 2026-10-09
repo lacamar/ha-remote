@@ -1,4 +1,4 @@
-%global tag 0.2.17
+%global tag 0.3.0
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,16 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.0-1
+- Fix tap approval after reconnect
+- Clear stale notifications on restart
+- Rate limit prompts
+- Add ha-remote-auth check
+- Add per-kind policy
+- Log verdicts to the HA logbook
+- Allow ssh from listed networks
+- Add watchdog and sandboxing
+
 * Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.2.17-1
 - Dismiss the prompt on deny
 - Deny by cancelling the tap confirmation

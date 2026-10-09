@@ -4,6 +4,8 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+Type=notify
+WatchdogSec=30
 ExecStart=/usr/bin/ha-remote-auth
 Restart=on-failure
 RestartSec=10
@@ -13,6 +15,23 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
+StateDirectory=ha-remote
+# TIOCSTI, signalling the asker, its tty, the ssh daemon's sockets
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_SYS_PTRACE
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target
