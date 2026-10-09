@@ -42,6 +42,9 @@ fall back to the password. Verdicts go to the HA logbook.
 
 `sudo ha-remote-auth check` tests the PAM setup, the token and the notify service.
 
+Set the polkit panel to floating in noctalia (`polkit_placement = "floating"`): an attached panel
+sits under fullscreen windows and cannot be submitted.
+
 For the lock screen set `allow_empty_password = true` under `[lockscreen]` in noctalia. Touching
 the keyboard or mouse there asks the phone, and approving unlocks. Submitting it empty, or
 unlocking the Lock from HA or Apple Home, waits for the phone; a typed password unlocks as usual and clears the request.

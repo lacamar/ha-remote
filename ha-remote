@@ -433,6 +433,9 @@ class Remote:
         # Keys would go to the lock screen instead.
         if status.get("locked") or status.get("activePanelId") != "polkit":
             return
+        # A window still holding focus (e.g. fullscreen over a top-layer panel) would get the keys.
+        if submit and run("niri", "msg", "-j", "focused-window").stdout.strip() != "null":
+            return log.warning("polkit: panel has no keyboard focus; use a floating polkit panel")
         if submit:
             # The panel ignores an empty submit; the approval is what authenticates, not this text.
             run("wtype", "x", "-k", "Return")

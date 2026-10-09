@@ -1,4 +1,4 @@
-%global tag 0.3.0
+%global tag 0.3.1
 
 Name:     ha-remote
 Version:  %{tag}
@@ -87,6 +87,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.1-1
+- Never type into a focused window for polkit
+- Document floating polkit panel
+
 * Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.0-1
 - Fix tap approval after reconnect
 - Clear stale notifications on restart
