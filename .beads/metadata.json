@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ha_remote",
+  "project_id": "6a0d1c08-a47d-4c03-bfa5-b387ee700560"
+}
