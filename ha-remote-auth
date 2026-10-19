@@ -21,6 +21,8 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from haremote import tailscale_note
+
 log = logging.getLogger("ha-remote-auth")
 
 CONFIG_PATH = Path("/etc/ha-remote/auth.toml")
@@ -210,7 +212,7 @@ class Auth:
         if uid == 0 and service in ("sudo", "sudo-i") and app_comm == "sudo":
             return "sudo", (args(app) or "a shell")[:120] + via, app
         if uid == 0 and service == "polkit-1":
-            caller = next((f"{comm} {args(pid)}" for (_, child), (pid, comm) in zip(chain, chain[1:]) if child == "pkttyagent"), None)
+            caller = next((f"{comm} {args(pid)}" for (_, child), (pid, comm) in itertools.pairwise(chain) if child == "pkttyagent"), None)
             return "polkit", (pkexec_commands() or caller or "a system action")[:120] + via, app
         if uid == self.user.pw_uid and service == "login" and "noctalia" in comms:
             # PAM runs in a forked child; key by the main process like ask_lockscreen.
@@ -232,7 +234,7 @@ class Auth:
     async def logbook(self, message):
         try:
             await self.service("logbook", "log", {"name": self.name, "message": message})
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (TimeoutError, aiohttp.ClientError):
             pass
 
     def save(self):
@@ -272,7 +274,7 @@ class Auth:
                     "actions": [
                         {"action": approve, "title": "Approve", "authenticationRequired": True},
                         {"action": deny, "title": "Deny", "destructive": True}]}})
-        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
+        except (TimeoutError, aiohttp.ClientError, ConnectionError) as e:
             log.warning("notify failed: %s", e)
             await self.drop(request)
             return None
@@ -290,7 +292,7 @@ class Auth:
             if self.ws and request.sub:
                 await self.ws.send_json({"id": next(self.ids), "type": "unsubscribe_events", "subscription": request.sub})
             await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": self.tag(request)}})
-        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError):
+        except (TimeoutError, aiohttp.ClientError, ConnectionError):
             pass
 
     async def expire(self, request):
@@ -447,7 +449,7 @@ class Auth:
         for tag in stale:
             try:
                 await self.service("notify", self.notify_service, {"message": "clear_notification", "data": {"tag": tag}})
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (TimeoutError, aiohttp.ClientError):
                 pass
         self.save()
         for request in list(self.requests.values()):
@@ -500,7 +502,7 @@ class Auth:
                 async with self.session.get(f"{self.url}/api/services") as r:
                     services = {s["domain"]: s["services"] for s in await r.json()}
                 report(self.notify_service in services.get("notify", {}), f"notify.{self.notify_service}")
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except (TimeoutError, aiohttp.ClientError, OSError) as e:
                 report(False, f"HA at {self.url}: {e}")
         return not failed
 
@@ -517,8 +519,8 @@ class Auth:
                 try:
                     await self.listen()
                     delay = 1
-                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-                    log.warning("disconnected: %s", e)
+                except (TimeoutError, aiohttp.ClientError, OSError) as e:
+                    log.warning("disconnected: %s%s", e, tailscale_note())
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 

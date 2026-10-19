@@ -1,15 +1,16 @@
 {
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "command": "bd prime --hook-json",
-            "type": "command"
-          }
-        ],
-        "matcher": ""
-      }
+  "permissions": {
+    "allow": [
+      "Bash(journalctl:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl show:*)",
+      "Bash(systemctl --user status:*)",
+      "Bash(systemctl --user show:*)",
+      "Bash(rpm -q:*)",
+      "Bash(ruff check:*)",
+      "Bash(python3 test_auth.py)",
+      "Bash(./dev-deploy)",
+      "Bash(./release)"
     ]
   }
 }

@@ -1,6 +1,10 @@
 import asyncio
 import importlib.machinery
 import importlib.util
+import os
+
+import aiohttp
+from aiohttp import web
 
 loader = importlib.machinery.SourceFileLoader("auth", "ha-remote-auth")
 auth = importlib.util.module_from_spec(importlib.util.spec_from_loader("auth", loader))
@@ -58,6 +62,8 @@ async def main():
     await expire()
     await rate_limit()
     await policy()
+    await fake_ha(True)
+    await fake_ha(False)
 
 
 async def resubscribe():
@@ -91,6 +97,45 @@ async def policy():
     assert "url" not in a.calls[-1][2]["data"]
     assert await a.ask("lockscreen", "unlock", 3)
     assert "url" in a.calls[-1][2]["data"]
+
+
+async def fake_ha(approve):
+    a = make(approver_user_id="phone")
+    a.submit = lambda r: None
+    actions = asyncio.Queue()
+
+    async def ws_handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_json({"type": "auth_required"})
+        await ws.receive_json()
+        await ws.send_json({"type": "auth_ok"})
+        await ws.receive_json()
+        await ws.send_json({"id": 1, "type": "result", "result": {"id": "ha-remote"}})
+        for i in (2, 3):
+            await ws.receive_json()
+            await ws.send_json({"id": i, "type": "result", "success": True})
+        action = await actions.get()
+        await ws.send_json({"type": "event", "event": {"data": {"action": action}, "context": {"user_id": "phone"}}})
+        await ws.receive_json()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/api/websocket", ws_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    a.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    async with aiohttp.ClientSession() as a.session:
+        listener = asyncio.create_task(a.listen())
+        while not a.connected:
+            await asyncio.sleep(0.01)
+        r = await a.ask("sudo", "true", os.getpid())
+        await actions.put(f"HAREMOTE_{'APPROVE' if approve else 'DENY'}_{r.nonce}")
+        assert await r.verdict is approve
+        listener.cancel()
+    await runner.cleanup()
 
 
 def deny_while_blocking(a, r):

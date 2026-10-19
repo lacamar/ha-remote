@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import socket
@@ -19,7 +20,16 @@ def prefix(cfg):
 
 
 def secret(key):
-    proc = subprocess.run(["secret-tool", "lookup", "service", "ha-remote", "key", key], capture_output=True, text=True)
+    proc = subprocess.run(["secret-tool", "lookup", "service", "ha-remote", "key", key], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise SystemExit(f"secret missing: secret-tool store --label='ha-remote {key}' service ha-remote key {key}")
     return proc.stdout.rstrip("\n")
+
+
+def tailscale_note():
+    try:
+        out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5, check=False).stdout
+        state = json.loads(out).get("BackendState")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+    return "" if state in (None, "Running") else f" (tailscale {state}: run tailscale up)"

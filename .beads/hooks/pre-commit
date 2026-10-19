@@ -57,3 +57,4 @@ if command -v bd >/dev/null 2>&1; then
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
 # --- END BEADS INTEGRATION v1.3.1 ---
+cd "$(git rev-parse --show-toplevel)" && ruff check -q . && python3 test_auth.py >/dev/null || exit 1

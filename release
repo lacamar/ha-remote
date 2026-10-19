@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+cd "$(dirname "$0")"
+ver=$(sed -n 's/^%global tag *//p' ha-remote.spec)
+mx-rpm -S --no-git-commit --copr arm64-misc --copr-wait ha-remote.spec
+until dnf repoquery -q --refresh --repo copr:copr.fedorainfracloud.org:lacamar:arm64-misc ha-remote | grep -q -- "-$ver-"; do sleep 20; done
+pkexec dnf upgrade -y --refresh ha-remote

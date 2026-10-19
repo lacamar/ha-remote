@@ -9,12 +9,12 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiohttp
 
-from haremote import AUTH_SOCKET, load_config, prefix, secret
+from haremote import AUTH_SOCKET, load_config, prefix, secret, tailscale_note
 
 log = logging.getLogger("ha-remote")
 
@@ -38,7 +38,7 @@ AC = first("/sys/class/power_supply/*", lambda p: Path(p, "type").read_text().st
 
 
 def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
 
 
 def read(path, default=None):
@@ -110,7 +110,7 @@ def nuphy_set(level):
             continue
         try:
             key = nuphy_xfer(fd, [0x55, 0xee, 0, 0, 0, 0, 0, 0, *os.urandom(56)])[4]
-            frame = lambda cmd, *fields: [0x55, cmd, 0, 0, *(b ^ key for b in fields)] + [0] * (60 - len(fields))
+            frame = lambda cmd, *fields, key=key: [0x55, cmd, 0, 0, *(b ^ key for b in fields)] + [0] * (60 - len(fields))
             apply = frame(0xd5, 0x11, 0, 0, 0)
             nuphy_xfer(fd, apply)
             nuphy_xfer(fd, frame(0xd6, 1, 1, 0, 1, level))
@@ -144,9 +144,9 @@ class Idle(threading.Thread):
     def run(self):
         try:
             sys.path.insert(0, "/usr/share/ha-remote/protocols")
-            from pywayland.client import Display
             from hrproto.ext_idle_notify_v1 import ExtIdleNotifierV1
             from hrproto.wayland import WlSeat
+            from pywayland.client import Display
             display = Display()
             display.connect()
             registry = display.get_registry()
@@ -575,7 +575,7 @@ class Remote:
                                           device_class="power", unit_of_measurement="W", state_class="measurement")
                     await self.post_smc()
                     await self.post_state(f"sensor.{self.prefix}_last_seen",
-                                          datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                          datetime.now(UTC).isoformat(timespec="seconds"),
                                           friendly_name=f"{self.name} last seen", device_class="timestamp")
                 await self.mirror_job(s["job"])
                 last_error = None
@@ -587,7 +587,7 @@ class Remote:
             try:
                 await asyncio.wait_for(self.poll_now.wait(), POLL_S)
                 await asyncio.sleep(0.3)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def run_forever(self):
@@ -607,8 +607,8 @@ class Remote:
                 try:
                     await self.listen(queue)
                     delay = 1
-                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-                    log.warning("disconnected: %s", e)
+                except (TimeoutError, aiohttp.ClientError, OSError) as e:
+                    log.warning("disconnected: %s%s", e, tailscale_note())
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 

@@ -1,4 +1,4 @@
-%global tag 0.3.1
+%global tag 0.3.2
 
 Name:     ha-remote
 Version:  %{tag}
@@ -12,6 +12,7 @@ Source0:  %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 BuildArch: noarch
 
 BuildRequires: python3-pywayland
+BuildRequires: python3-aiohttp
 BuildRequires: wayland-devel
 BuildRequires: wayland-protocols-devel
 BuildRequires: python3-devel
@@ -54,6 +55,9 @@ install -Dm644 config.example.toml auth.example.toml -t %{buildroot}%{_datadir}/
 install -dm700 %{buildroot}%{_sysconfdir}/%{name}
 cp -r protocols %{buildroot}%{_datadir}/%{name}/
 
+%check
+python3 test_auth.py
+
 %post
 %systemd_user_post %{name}.service
 %systemd_post %{name}-auth.service
@@ -87,6 +91,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Mon Oct 19 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.2-1
+- Log tailscale state on disconnect
+- Run tests in %%check
+
 * Fri Oct 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.1-1
 - Never type into a focused window for polkit
 - Document floating polkit panel

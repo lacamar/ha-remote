@@ -1,0 +1,8 @@
+target-version = "py314"
+
+extend-include = ["ha-remote", "ha-remote-auth", "ha-remote-setup", "pam-helper"]
+
+[lint]
+# UP031: Jinja templates read better with % than with {{{{ }}}}.
+# BLE001: daemon loops log and carry on by design.
+extend-ignore = ["UP031", "BLE001"]
