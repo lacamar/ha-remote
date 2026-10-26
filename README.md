@@ -52,3 +52,9 @@ unlocking the Lock from HA or Apple Home, waits for the phone; a typed password 
 The root service holds its own token and checks that every tap came from the approver's HA user
 with a one-time code. The token must not belong to the approver, or anything holding it could
 forge a tap.
+
+## Development
+
+    just test
+    just lint
+    ./release
