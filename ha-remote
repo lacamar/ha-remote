@@ -580,9 +580,12 @@ class Remote:
                 await self.mirror_job(s["job"])
                 last_error = None
             except Exception as e:
-                if repr(e) != last_error:
-                    log.warning("poll failed: %r", e)
-                last_error = repr(e)
+                # repr() of ClientResponseError includes the Authorization header
+                err = (f"{e.status} {e.message} {e.request_info.real_url.path}"
+                       if isinstance(e, aiohttp.ClientResponseError) else repr(e))
+                if err != last_error:
+                    log.warning("poll failed: %s", err)
+                last_error = err
             self.poll_now.clear()
             try:
                 await asyncio.wait_for(self.poll_now.wait(), POLL_S)

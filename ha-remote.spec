@@ -1,4 +1,4 @@
-%global tag 0.3.2
+%global tag 0.3.3
 
 Name:     ha-remote
 Version:  %{tag}
@@ -91,6 +91,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Tue Oct 27 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.3-1
+- Stop logging HA token on poll errors
+- Dedupe repeated HTTP poll errors
+
 * Mon Oct 19 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.2-1
 - Log tailscale state on disconnect
 - Run tests in %%check
