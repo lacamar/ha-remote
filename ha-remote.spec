@@ -1,4 +1,4 @@
-%global tag 0.3.3
+%global tag 0.3.4
 
 Name:     ha-remote
 Version:  %{tag}
@@ -91,6 +91,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Thu Oct 29 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.4-1
+- Focus polkit panel monitor before submitting
+- Fix dev-deploy finding local haremote.py
+
 * Tue Oct 27 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.3-1
 - Stop logging HA token on poll errors
 - Dedupe repeated HTTP poll errors

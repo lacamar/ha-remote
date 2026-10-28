@@ -433,6 +433,12 @@ class Remote:
         # Keys would go to the lock screen instead.
         if status.get("locked") or status.get("activePanelId") != "polkit":
             return
+        if submit:
+            # The OnDemand panel only gets keys while its output is focused.
+            layers = json.loads(run("niri", "msg", "-j", "layers").stdout)
+            output = next((la["output"] for la in layers if la["namespace"] == "noctalia-panel"), None)
+            if output:
+                run("niri", "msg", "action", "focus-monitor", output)
         # A window still holding focus (e.g. fullscreen over a top-layer panel) would get the keys.
         if submit and run("niri", "msg", "-j", "focused-window").stdout.strip() != "null":
             return log.warning("polkit: panel has no keyboard focus; use a floating polkit panel")

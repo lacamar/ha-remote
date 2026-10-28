@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")"
-lib=$(python3 -c 'import haremote, os; print(os.path.dirname(haremote.__file__))')
+lib=$(python3 -I -c 'import haremote, os; print(os.path.dirname(haremote.__file__))')
 pkexec sh -c "install -m755 $PWD/ha-remote $PWD/ha-remote-auth $PWD/ha-remote-setup /usr/bin/ \
   && install -m755 $PWD/pam-helper /usr/libexec/ha-remote/ \
   && install -m644 $PWD/haremote.py $lib/ \
