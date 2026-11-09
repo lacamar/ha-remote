@@ -1,5 +1,6 @@
 test:
-    python3 test_auth.py
+    cargo test
 
 lint:
-    ruff check .
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings

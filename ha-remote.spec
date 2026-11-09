@@ -1,4 +1,4 @@
-%global tag 0.3.4
+%global tag 0.4.0
 
 Name:     ha-remote
 Version:  %{tag}
@@ -9,18 +9,10 @@ License:  MIT
 URL:      https://github.com/lacamar/ha-remote
 Source0:  %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 
-BuildArch: noarch
-
-BuildRequires: python3-pywayland
-BuildRequires: python3-aiohttp
-BuildRequires: wayland-devel
-BuildRequires: wayland-protocols-devel
-BuildRequires: python3-devel
+BuildRequires: cargo-rpm-macros >= 26
 BuildRequires: systemd-rpm-macros
 %{?systemd_ordering}
 
-Requires: python3-aiohttp
-Requires: python3-pywayland
 Requires: wtype
 Requires: brightnessctl
 Requires: playerctl
@@ -36,27 +28,26 @@ the lock screen.
 
 %prep
 %autosetup
+%cargo_prep
+rm -f Cargo.lock
+
+%generate_buildrequires
+%cargo_generate_buildrequires
 
 %build
-mkdir -p protocols/hrproto
-touch protocols/hrproto/__init__.py
-python3 -m pywayland.scanner -o protocols/hrproto \
-    -i %{_datadir}/wayland/wayland.xml \
-    %{_datadir}/wayland-protocols/staging/ext-idle-notify/ext-idle-notify-v1.xml
+%cargo_build
 
 %install
-install -Dm755 ha-remote ha-remote-setup ha-remote-auth -t %{buildroot}%{_bindir}
-install -Dm755 pam-helper -t %{buildroot}%{_libexecdir}/%{name}
-install -Dm644 haremote.py -t %{buildroot}%{python3_sitelib}
+install -Dm755 target/rpm/ha-remote target/rpm/ha-remote-setup target/rpm/ha-remote-auth -t %{buildroot}%{_bindir}
+install -Dm755 target/rpm/pam-helper -t %{buildroot}%{_libexecdir}/%{name}
 install -Dm644 ha-remote.service -t %{buildroot}%{_userunitdir}
 install -Dm644 70-ha-remote-nuphy.rules -t %{buildroot}%{_udevrulesdir}
 install -Dm644 ha-remote-auth.service -t %{buildroot}%{_unitdir}
 install -Dm644 config.example.toml auth.example.toml -t %{buildroot}%{_datadir}/%{name}
 install -dm700 %{buildroot}%{_sysconfdir}/%{name}
-cp -r protocols %{buildroot}%{_datadir}/%{name}/
 
 %check
-python3 test_auth.py
+%cargo_test
 
 %post
 %systemd_user_post %{name}.service
@@ -83,7 +74,6 @@ fi
 %{_bindir}/ha-remote-setup
 %{_bindir}/ha-remote-auth
 %{_libexecdir}/%{name}/
-%pycached %{python3_sitelib}/haremote.py
 %{_userunitdir}/ha-remote.service
 %{_udevrulesdir}/70-ha-remote-nuphy.rules
 %{_unitdir}/ha-remote-auth.service
@@ -91,6 +81,10 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Mon Nov 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.4.0-1
+- Rewrite in Rust
+- Drop Python and pywayland dependencies
+
 * Thu Oct 29 2026 Lachlan Marie <lchlnm@pm.me> - 0.3.4-1
 - Focus polkit panel monitor before submitting
 - Fix dev-deploy finding local haremote.py

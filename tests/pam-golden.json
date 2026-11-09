@@ -1,0 +1,42 @@
+{
+ "fresh": {
+  "etc": {},
+  "ven": {
+   "sudo": "#%PAM-1.0\nauth       include      system-auth\naccount    include      system-auth\n",
+   "polkit-1": "auth include system-auth\n",
+   "login": "#%PAM-1.0\nauth substack system-auth\n"
+  },
+  "enabled": {
+   "login": "#%PAM-1.0\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\nauth substack system-auth\n",
+   "polkit-1": "auth       sufficient   pam_exec.so quiet seteuid /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\nauth include system-auth\n",
+   "sudo": "#%PAM-1.0\nauth       optional     pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\nauth       include      system-auth\naccount    include      system-auth\n"
+  },
+  "disabled": {}
+ },
+ "old_lines": {
+  "etc": {
+   "sudo": "#%PAM-1.0\nauth optional pam_exec.so /usr/libexec/ha-remote/pam-helper start\nauth       include      system-auth\n"
+  },
+  "ven": {
+   "sudo": "#%PAM-1.0\nauth       include      system-auth\naccount    include      system-auth\n"
+  },
+  "enabled": {
+   "sudo": "#%PAM-1.0\nauth       optional     pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\nauth       include      system-auth\n"
+  },
+  "disabled": {
+   "sudo": "#%PAM-1.0\nauth       include      system-auth\n"
+  }
+ },
+ "no_auth_no_newline": {
+  "etc": {
+   "sudo-i": "account include x"
+  },
+  "ven": {},
+  "enabled": {
+   "sudo-i": "account include xauth       optional     pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\n"
+  },
+  "disabled": {
+   "sudo-i": ""
+  }
+ }
+}

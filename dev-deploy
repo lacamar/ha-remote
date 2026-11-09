@@ -1,10 +1,10 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")"
-lib=$(python3 -I -c 'import haremote, os; print(os.path.dirname(haremote.__file__))')
-pkexec sh -c "install -m755 $PWD/ha-remote $PWD/ha-remote-auth $PWD/ha-remote-setup /usr/bin/ \
-  && install -m755 $PWD/pam-helper /usr/libexec/ha-remote/ \
-  && install -m644 $PWD/haremote.py $lib/ \
+cargo build --release
+t=$PWD/target/release
+pkexec sh -c "install -m755 $t/ha-remote $t/ha-remote-auth $t/ha-remote-setup /usr/bin/ \
+  && install -m755 $t/pam-helper /usr/libexec/ha-remote/ \
   && systemctl restart ha-remote-auth"
 systemctl --user restart ha-remote
 sleep 3
