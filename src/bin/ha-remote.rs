@@ -367,7 +367,11 @@ impl Remote {
         let job_entity = e("input_boolean", "job");
         Remote {
             url: cfg.url(),
-            http: http_client(&token, Some(Duration::from_secs(10)), None),
+            http: http_client(
+                &token,
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(10)),
+            ),
             token,
             notify_service: cfg.ha.notify_service.clone().filter(|s| !s.is_empty()),
             player: cfg.player.clone(),
@@ -516,6 +520,10 @@ impl Remote {
         run(&["niri", "msg", "action", "power-on-monitors"])?;
         self.st().screen_off = false;
         sleep_s(0.5);
+        // Unlocked meanwhile: the keystrokes would land in the focused window.
+        if !truthy(noctalia_status()?.get("locked")) {
+            return Ok(());
+        }
         run(&[
             "wtype",
             "-M",
@@ -921,9 +929,14 @@ impl Remote {
         }
     }
 
-    async fn listen(self: &Arc<Self>, queue: &mpsc::UnboundedSender<Value>) -> Result<()> {
+    async fn listen(
+        self: &Arc<Self>,
+        queue: &mpsc::UnboundedSender<Value>,
+        delay: &mut u64,
+    ) -> Result<()> {
         let mut ws = Ws::connect(&self.url, true).await?;
         ws.auth(&self.token).await?;
+        *delay = 1;
         let entities: Vec<&str> = self.actions.iter().map(|(e, _, _)| e.as_str()).collect();
         ws.send(&json!({"id": 1, "type": "subscribe_trigger",
                         "trigger": {"platform": "state", "entity_id": entities}}))
@@ -973,7 +986,7 @@ impl Remote {
                             let this = self.clone();
                             match msg["type"].as_str() {
                                 Some("polkit") => {
-                                    let submit = truthy(msg.get("submit"));
+                                    let submit = msg["submit"] == true;
                                     tokio::task::spawn_blocking(move || {
                                         if let Err(e) = this.polkit_panel(submit) {
                                             error!("polkit_panel failed: {e}");
@@ -1217,6 +1230,7 @@ impl Remote {
             if let Err(e) = idle_watch(this, input_tx) {
                 error!("idle watcher stopped: {e}");
             }
+            std::process::exit(1);
         });
         let this = self.clone();
         tokio::spawn(async move {
@@ -1233,12 +1247,9 @@ impl Remote {
         }
         let mut delay = 1;
         loop {
-            match self.listen(&queue_tx).await {
-                Ok(()) => delay = 1,
-                Err(e) => {
-                    exit_if_fatal(&e);
-                    warn!("disconnected: {e}{}", tailscale_note().await);
-                }
+            if let Err(e) = self.listen(&queue_tx, &mut delay).await {
+                exit_if_fatal(&e);
+                warn!("disconnected: {e}{}", tailscale_note().await);
             }
             tokio::time::sleep(Duration::from_secs(delay)).await;
             delay = (delay * 2).min(60);

@@ -1,4 +1,4 @@
-%global tag 0.4.0
+%global tag 0.4.1
 
 Name:     ha-remote
 Version:  %{tag}
@@ -81,6 +81,18 @@ fi
 %{_datadir}/%{name}
 
 %changelog
+* Wed Nov 11 2026 Lachlan Marie <lchlnm@pm.me> - 0.4.1-1
+- Verify pkexec binary and asker uid
+- Reject approve from Deny event
+- Reject unknown auth.toml keys
+- Fix PAM line glued onto unterminated last line
+- Keep listening after accept and submit errors
+- Bound socket lines, sanitize command text
+- Don't log config lines on parse errors
+- Re-check lock before typing unlock
+- HTTP timeout and backoff reset in user daemon
+- Document approval limits
+
 * Mon Nov 09 2026 Lachlan Marie <lchlnm@pm.me> - 0.4.0-1
 - Rewrite in Rust
 - Drop Python and pywayland dependencies

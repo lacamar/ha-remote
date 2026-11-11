@@ -53,6 +53,15 @@ The root service holds its own token and checks that every tap came from the app
 with a one-time code. The token must not belong to the approver, or anything holding it could
 forge a tap.
 
+Limits:
+- The user service's keyring token is an HA admin token. Anything running as you can read it,
+  watch for the one-time code and send the phone a look-alike notification: one careless tap
+  then grants root. Treat a tap as a password entry.
+- `never` matches the command text only (`sudo /bin/rm` slips past it); it is a convenience, not
+  a control.
+- ssh detection looks for an `sshd` ancestor; a process detached from the ssh session
+  (`systemd-run --user`, a tmux server started elsewhere) is not seen as remote.
+
 ## Development
 
     just test

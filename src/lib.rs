@@ -81,7 +81,13 @@ fn home() -> PathBuf {
 pub fn read_toml<T: DeserializeOwned>(path: &std::path::Path) -> T {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| fatal(&format!("{}: {e}", path.display())));
-    toml::from_str(&text).unwrap_or_else(|e| fatal(&format!("{}: {e}", path.display())))
+    // Not the error's Display: it quotes the offending line, which may hold the token.
+    toml::from_str(&text).unwrap_or_else(|e| {
+        let line = e
+            .span()
+            .map_or(0, |s| text[..s.start].matches('\n').count() + 1);
+        fatal(&format!("{} line {line}: {}", path.display(), e.message()))
+    })
 }
 
 pub fn load_config() -> Config {

@@ -16,6 +16,7 @@ ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 StateDirectory=ha-remote
+StateDirectoryMode=0700
 # TIOCSTI, signalling the asker, its tty, the ssh daemon's sockets
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_SYS_PTRACE
 ProtectKernelTunables=yes

@@ -21,11 +21,13 @@ use tokio::time::{Instant, sleep};
 
 const CONFIG_PATH: &str = "/etc/ha-remote/auth.toml";
 const DENY_EVENT: &str = "Deny";
+const ACTION_EVENT: &str = "mobile_app_notification_action";
 const SOCKET: &str = ha_remote::AUTH_SOCKET;
 const PENDING: &str = "/var/lib/ha-remote/pending";
 const HELPER: &str = "/usr/libexec/ha-remote/pam-helper";
 const PAM_SERVICES: [&str; 4] = ["sudo", "sudo-i", "polkit-1", "login"];
 const HOLD_MAX_S: f64 = 60.0;
+const MAX_LINE: u64 = 65536;
 const RATE_LIMIT: usize = 5;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
@@ -76,6 +78,13 @@ fn service_name(path: &Path) -> &str {
         .unwrap_or_default()
 }
 
+fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+    let tmp = path.with_extension("ha-remote-tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, path)
+}
+
 fn enable(etc: &Path, vendor_dir: &Path) -> io::Result<()> {
     for (path, vendor) in pam_files(etc, vendor_dir) {
         let text = std::fs::read_to_string(if path.exists() { &path } else { &vendor })?;
@@ -86,9 +95,12 @@ fn enable(etc: &Path, vendor_dir: &Path) -> io::Result<()> {
             continue;
         }
         lines.retain(|l| !l.contains(HELPER));
+        if let Some(last) = lines.last_mut().filter(|l| !l.ends_with('\n')) {
+            last.push('\n');
+        }
         let at = first_auth(&lines);
         lines.splice(at..at, wanted);
-        std::fs::write(&path, lines.concat())?;
+        write_atomic(&path, &lines.concat())?;
         println!("enabled {}", path.display());
     }
     Ok(())
@@ -106,10 +118,10 @@ fn disable(etc: &Path, vendor_dir: &Path) -> io::Result<()> {
             .split_inclusive('\n')
             .filter(|l| !l.contains(HELPER))
             .collect();
-        if vendor.exists() && std::fs::read_to_string(&vendor)? == text {
+        if vendor.exists() && std::fs::read_to_string(&vendor)?.trim_end() == text.trim_end() {
             std::fs::remove_file(&path)?;
         } else {
-            std::fs::write(&path, text)?;
+            write_atomic(&path, &text)?;
         }
         println!("disabled {}", path.display());
     }
@@ -151,7 +163,7 @@ fn args(pid: i32) -> String {
     let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
         return String::new();
     };
-    let raw = String::from_utf8_lossy(&raw);
+    let raw = String::from_utf8_lossy(&raw).replace(|c: char| c.is_control() && c != '\0', " ");
     raw.split('\0')
         .skip(1)
         .collect::<Vec<_>>()
@@ -168,9 +180,22 @@ fn proc_pids() -> impl Iterator<Item = (i32, PathBuf)> {
         .filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, e.path())))
 }
 
+fn real_uid(pid: i32) -> Option<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn pkexec_commands() -> String {
     proc_pids()
-        .filter(|&(pid, _)| proc_stat(pid).is_some_and(|s| s.comm == "pkexec"))
+        .filter(|(_, path)| {
+            std::fs::read_link(path.join("exe")).is_ok_and(|e| e == Path::new("/usr/bin/pkexec"))
+        })
         .map(|(pid, _)| args(pid))
         .filter(|a| !a.is_empty())
         .collect::<Vec<_>>()
@@ -303,19 +328,10 @@ fn quote(s: &str) -> String {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
-/// Python truthiness of a JSON value.
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64() != Some(0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
+    if s.chars().count() <= n {
+        return s.to_owned();
     }
+    s.chars().take(n - 1).chain(['…']).collect()
 }
 
 struct User {
@@ -335,6 +351,7 @@ fn getpwnam(name: &str) -> Option<User> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Config {
     url: String,
     token: String,
@@ -348,6 +365,7 @@ struct Config {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct Policy {
     tap: Option<Vec<String>>,
     #[serde(default)]
@@ -388,6 +406,42 @@ enum Verdict {
     Approved,
     Denied,
     Cancelled,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum Msg {
+    Presence {
+        active: bool,
+    },
+    Lockscreen,
+    Locked {
+        locked: bool,
+    },
+    Hold {
+        s: f64,
+    },
+    Auth(AuthReq),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, PartialEq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum Stage {
+    Start,
+    Finish,
+}
+
+#[derive(Deserialize)]
+struct AuthReq {
+    stage: Stage,
+    #[serde(default)]
+    typed: bool,
+    service: Option<String>,
+    user: Option<String>,
+    #[serde(default)]
+    rhost: String,
 }
 
 struct Prompt {
@@ -525,12 +579,18 @@ impl Auth {
 }
 
 impl Auth {
-    fn describe(&self, pid: i32, uid: u32, req: &Value) -> Option<Prompt> {
-        self.describe_chain(&ancestors(pid), uid, req)
+    fn describe(&self, pid: i32, uid: u32, req: &AuthReq) -> Option<Prompt> {
+        self.describe_chain(&ancestors(pid), uid, req, real_uid)
     }
 
-    fn describe_chain(&self, chain: &[(i32, String)], uid: u32, req: &Value) -> Option<Prompt> {
-        if req["user"].as_str() != Some(&self.user.name) || truthy(&req["rhost"]) {
+    fn describe_chain(
+        &self,
+        chain: &[(i32, String)],
+        uid: u32,
+        req: &AuthReq,
+        real_uid: impl Fn(i32) -> Option<u32>,
+    ) -> Option<Prompt> {
+        if req.user.as_deref() != Some(&self.user.name) || !req.rhost.is_empty() {
             return None;
         }
         if chain.len() < 2 {
@@ -550,8 +610,14 @@ impl Auth {
             via = format!(" (ssh from {peer})");
         }
         let (app, ref app_comm) = chain[1];
-        let service = req["service"].as_str();
-        if uid == 0 && matches!(service, Some("sudo" | "sudo-i")) && app_comm == "sudo" {
+        let service = req.service.as_deref();
+        // Another local user's sudo or polkit helper may name us as PAM_USER.
+        let asker_is_user = real_uid(app) == Some(self.user.uid);
+        if uid == 0
+            && asker_is_user
+            && matches!(service, Some("sudo" | "sudo-i"))
+            && app_comm == "sudo"
+        {
             let what = args(app);
             let what = if what.is_empty() {
                 "a shell".into()
@@ -564,12 +630,12 @@ impl Auth {
                 app,
             });
         }
-        if uid == 0 && service == Some("polkit-1") {
+        if uid == 0 && asker_is_user && service == Some("polkit-1") {
             let caller = chain
                 .windows(2)
                 .find(|w| w[0].1 == "pkttyagent")
                 .map(|w| format!("{} {}", w[1].1, args(w[1].0)));
-            let what = Some(pkexec_commands()).filter(|s| !s.is_empty()).or(caller);
+            let what = caller.or(Some(pkexec_commands()).filter(|s| !s.is_empty()));
             let what = what.unwrap_or_else(|| "a system action".into());
             return Some(Prompt {
                 kind: Kind::Polkit,
@@ -725,14 +791,14 @@ impl Auth {
             .await;
         if let Err(e) = sent {
             warn!("notify failed: {e}");
-            self.discard(&request).await;
+            self.discard(&request);
             return None;
         }
         spawn_local(self.clone().expire(request.clone()));
         Some(request)
     }
 
-    async fn discard(&self, request: &Rc<Request>) {
+    fn discard(self: &Rc<Self>, request: &Rc<Request>) {
         if !self.is_current(request) {
             return;
         }
@@ -743,11 +809,15 @@ impl Auth {
             let id = self.next_id();
             self.ws_send(json!({"id": id, "type": "unsubscribe_events", "subscription": sub}));
         }
+        spawn_local(self.clone().clear(request.tag()));
+    }
+
+    async fn clear(self: Rc<Self>, tag: String) {
         let _ = self
             .service(
                 "notify",
                 &self.notify_service,
-                json!({"message": "clear_notification", "data": {"tag": request.tag()}}),
+                json!({"message": "clear_notification", "data": {"tag": tag}}),
             )
             .await;
     }
@@ -760,7 +830,7 @@ impl Auth {
             }
             sleep(Duration::from_secs(1)).await;
         }
-        self.discard(&request).await;
+        self.discard(&request);
     }
 
     async fn start(
@@ -801,7 +871,7 @@ impl Auth {
         if let Some(r) = &request
             && (r.approved() || typed)
         {
-            self.discard(r).await;
+            self.discard(r);
             return r.approved();
         }
         if typed || !self.connected.get() {
@@ -821,7 +891,11 @@ impl Auth {
         self.wait(&request, reader).await
     }
 
-    async fn wait(&self, request: &Rc<Request>, reader: &mut BufReader<OwnedReadHalf>) -> bool {
+    async fn wait(
+        self: &Rc<Self>,
+        request: &Rc<Request>,
+        reader: &mut BufReader<OwnedReadHalf>,
+    ) -> bool {
         request.blocking.set(true);
         let mut verdict = request.verdict.subscribe();
         let mut byte = [0u8; 1];
@@ -829,7 +903,7 @@ impl Auth {
             _ = verdict.wait_for(|v| *v != Verdict::Pending) => {}
             _ = reader.read(&mut byte) => {}
         }
-        self.discard(request).await;
+        self.discard(request);
         Self::log_verdict(request);
         request.approved()
     }
@@ -951,47 +1025,31 @@ impl Auth {
         let mut line = String::new();
         loop {
             line.clear();
-            if reader.read_line(&mut line).await? == 0 {
+            if (&mut *reader).take(MAX_LINE).read_line(&mut line).await? == 0 {
                 return Ok(());
             }
-            let req: Value = serde_json::from_str(&line)?;
-            match req["type"].as_str() {
-                Some("presence") if owner => {
+            match serde_json::from_str(&line)? {
+                Msg::Presence { active } if owner => {
                     self.agent.replace(Some((conn, writer.clone())));
-                    if truthy(&req["active"]) && !self.holding() {
+                    if active && !self.holding() {
                         // Input at the laptop: drop a blocking phone wait so the password prompt returns.
                         self.abandon();
                     }
                 }
-                Some("lockscreen") if owner => {
+                Msg::Lockscreen if owner => {
                     spawn_local(self.clone().ask_lockscreen());
                 }
-                Some("locked") if owner => self.locked.set(truthy(&req["locked"])),
-                Some("hold") if owner => {
-                    let s = match &req["s"] {
-                        Value::Null => 0.0,
-                        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-                        Value::String(s) => s
-                            .trim()
-                            .parse()
-                            .map_err(|_| format!("could not convert string to float: {s:?}"))?,
-                        v => return Err(format!("bad hold: {v}").into()),
-                    };
-                    let s = if s.is_nan() {
-                        0.0
-                    } else {
-                        s.clamp(0.0, HOLD_MAX_S)
-                    };
-                    self.hold_until
-                        .set(Some(Instant::now() + Duration::from_secs_f64(s)));
+                Msg::Locked { locked } if owner => self.locked.set(locked),
+                Msg::Hold { s } if owner => {
+                    let s = Duration::from_secs_f64(s.clamp(0.0, HOLD_MAX_S));
+                    self.hold_until.set(Some(Instant::now() + s));
                 }
-                Some("auth") => {
+                Msg::Auth(req) => {
                     let prompt = self.describe(pid, uid, &req);
-                    let ok = if req["stage"] == "start" {
+                    let ok = if req.stage == Stage::Start {
                         self.start(prompt, reader, writer).await
                     } else {
-                        self.finish(prompt, truthy(&req["typed"]), reader, writer)
-                            .await
+                        self.finish(prompt, req.typed, reader, writer).await
                     };
                     let _ = writer.send(format!("{}\n", json!({"ok": ok})).into_bytes());
                     return Ok(());
@@ -1001,7 +1059,7 @@ impl Auth {
         }
     }
 
-    fn on_action(self: &Rc<Self>, event: &Value) -> io::Result<()> {
+    fn on_action(self: &Rc<Self>, event: &Value) {
         let action = event["data"]["action"].as_str().unwrap_or_default();
         let (verb, nonce) = action.rsplit_once('_').unwrap_or(("", action));
         let request = self
@@ -1011,10 +1069,10 @@ impl Auth {
             .find(|r| ct_eq(&r.nonce, nonce))
             .cloned();
         let Some(request) = request else {
-            return Ok(());
+            return;
         };
         if request.done() || !matches!(verb, "HAREMOTE_APPROVE" | "HAREMOTE_DENY") {
-            return Ok(());
+            return;
         }
         let user_id = &event["context"]["user_id"];
         if user_id.as_str() != Some(&self.approver) {
@@ -1022,9 +1080,18 @@ impl Auth {
                 "ignoring {verb} from user {}",
                 user_id.as_str().unwrap_or("None")
             );
-            return Ok(());
+            return;
         }
         let approved = verb == "HAREMOTE_APPROVE";
+        let event_type = event["event_type"].as_str();
+        // The Deny event's confirmation reads "Deny", so it must never approve.
+        if approved && event_type != Some(ACTION_EVENT) && event_type != request.event.as_deref() {
+            warn!(
+                "ignoring approve from event {}",
+                event_type.unwrap_or("None")
+            );
+            return;
+        }
         request.verdict.send_replace(if approved {
             Verdict::Approved
         } else {
@@ -1036,25 +1103,32 @@ impl Auth {
             request.kind.as_str(),
             request.what
         )));
-        self.submit(&request)
+        if let Err(e) = self.submit(&request) {
+            warn!("submit failed: {e}");
+        }
     }
 
     async fn handshake(&self, ws: &mut Ws) -> Result<()> {
         ws.auth(&self.token).await?;
         ws.send(&json!({"id": 1, "type": "auth/current_user"}))
             .await?;
-        if ws.recv_some().await?["result"]["id"].as_str() == Some(&self.approver) {
+        let me = ws.recv_some().await?;
+        let id = me["result"]["id"]
+            .as_str()
+            .ok_or("auth/current_user returned no user id")?;
+        if id == self.approver {
             return Err(Fatal(
                 "token belongs to the approver; use a token of a separate HA user".into(),
             )
             .into());
         }
-        ws.send(&json!({"id": 2, "type": "subscribe_events", "event_type": "mobile_app_notification_action"})).await?;
+        ws.send(&json!({"id": 2, "type": "subscribe_events", "event_type": ACTION_EVENT}))
+            .await?;
         ws.send(&json!({"id": 3, "type": "subscribe_events", "event_type": DENY_EVENT}))
             .await?;
         let mut ok = true;
         for _ in 0..2 {
-            ok &= truthy(&ws.recv_some().await?["success"]);
+            ok &= ws.recv_some().await?["success"] == true;
         }
         if !ok {
             return Err(
@@ -1082,9 +1156,10 @@ impl Auth {
         }
     }
 
-    async fn listen(self: &Rc<Self>) -> Result<()> {
+    async fn listen(self: &Rc<Self>, delay: &mut u64) -> Result<()> {
         let mut ws = Ws::connect(&self.url, true).await?;
         self.handshake(&mut ws).await?;
+        *delay = 1;
         let (tx, mut outbox) = mpsc::unbounded_channel();
         self.ws.replace(Some(tx));
         self.connected.set(true);
@@ -1095,7 +1170,7 @@ impl Auth {
                 tokio::select! {
                     msg = ws.recv() => match msg? {
                         None => return Ok(()),
-                        Some(data) if data["type"] == "event" => self.on_action(&data["event"])?,
+                        Some(data) if data["type"] == "event" => self.on_action(&data["event"]),
                         Some(_) => {}
                     },
                     Some(out) = outbox.recv() => ws.send(&out).await?,
@@ -1182,18 +1257,23 @@ impl Auth {
         });
         let me = self.clone();
         spawn_local(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                spawn_local(me.clone().handle(stream));
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        spawn_local(me.clone().handle(stream));
+                    }
+                    Err(e) => {
+                        warn!("accept: {e}");
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
             }
         });
         let mut delay = 1;
         loop {
-            match self.listen().await {
-                Ok(()) => delay = 1,
-                Err(e) => {
-                    exit_if_fatal(&e);
-                    warn!("disconnected: {e}{}", tailscale_note().await);
-                }
+            if let Err(e) = self.listen(&mut delay).await {
+                exit_if_fatal(&e);
+                warn!("disconnected: {e}{}", tailscale_note().await);
             }
             sleep(Duration::from_secs(delay)).await;
             delay = (delay * 2).min(60);
@@ -1282,11 +1362,88 @@ mod tests {
         task.await.unwrap()
     }
 
+    fn action(verb: &str, r: &Request, event_type: &str, user: &str) -> Value {
+        json!({"event_type": event_type, "data": {"action": format!("HAREMOTE_{verb}_{}", r.nonce)},
+               "context": {"user_id": user}})
+    }
+
+    #[tokio::test]
+    async fn actions() {
+        LocalSet::new()
+            .run_until(async {
+                let mut a = auth("");
+                a.approver = "phone".into();
+                let a = Rc::new(a);
+                let r = a.ask(Kind::Sudo, "true", 1).await.unwrap();
+                a.on_action(&action("APPROVE", &r, ACTION_EVENT, "intruder"));
+                a.on_action(
+                    &json!({"event_type": ACTION_EVENT, "data": {"action": "HAREMOTE_APPROVE_0"},
+                                    "context": {"user_id": "phone"}}),
+                );
+                a.on_action(&action("APPROVE", &r, DENY_EVENT, "phone"));
+                assert_eq!(r.verdict(), Verdict::Pending);
+                a.on_action(&action("APPROVE", &r, "sudo: true", "phone"));
+                assert_eq!(r.verdict(), Verdict::Approved);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn finish_consumes_once() {
+        LocalSet::new()
+            .run_until(async {
+                let a = make("");
+                let (mut reader, _peer) = pair();
+                let (writer, _outbox) = mpsc::unbounded_channel();
+                let prompt = || {
+                    Some(Prompt {
+                        kind: Kind::Sudo,
+                        what: "true".into(),
+                        app: 1,
+                    })
+                };
+                let r = a.ask(Kind::Sudo, "true", 1).await.unwrap();
+                r.verdict.send_replace(Verdict::Approved);
+                assert!(a.finish(prompt(), false, &mut reader, &writer).await);
+                assert!(!a.finish(prompt(), false, &mut reader, &writer).await);
+                a.ask(Kind::Sudo, "true", 1).await.unwrap();
+                assert!(!a.finish(prompt(), true, &mut reader, &writer).await);
+                assert!(a.get(1).is_none());
+            })
+            .await;
+    }
+
+    #[test]
+    fn describe_gating() {
+        let a = make("");
+        let chain = |c: &[&str]| -> Vec<(i32, String)> {
+            c.iter().zip(10..).map(|(c, p)| (p, (*c).into())).collect()
+        };
+        let req = |user: &str, rhost: &str| AuthReq {
+            stage: Stage::Start,
+            typed: false,
+            service: Some("sudo".into()),
+            user: Some(user.into()),
+            rhost: rhost.into(),
+        };
+        let sudo = chain(&["pam-helper", "sudo", "bash"]);
+        let d = |chain: &[(i32, String)], uid, req: &AuthReq, ruid| {
+            a.describe_chain(chain, uid, req, |_| Some(ruid))
+                .map(|p| p.kind)
+        };
+        assert_eq!(d(&sudo, 0, &req("root", ""), 0), Some(Kind::Sudo));
+        assert_eq!(d(&sudo, 1000, &req("root", ""), 0), None);
+        assert_eq!(d(&sudo, 0, &req("other", ""), 0), None);
+        assert_eq!(d(&sudo, 0, &req("root", "host"), 0), None);
+        assert_eq!(d(&sudo, 0, &req("root", ""), 1000), None);
+        let ssh = chain(&["pam-helper", "sudo", "bash", "sshd-session"]);
+        assert_eq!(d(&ssh, 0, &req("root", ""), 0), None);
+    }
+
     fn deny_while_blocking(a: &Rc<Auth>, r: &Rc<Request>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
         a.agent.replace(Some((0, tx)));
-        a.on_action(&json!({"data": {"action": format!("HAREMOTE_DENY_{}", r.nonce)}, "context": {"user_id": ""}}))
-            .unwrap();
+        a.on_action(&action("DENY", r, ACTION_EVENT, ""));
         let sent: Value = serde_json::from_slice(&rx.try_recv().unwrap()).unwrap();
         assert_eq!(sent, json!({"type": "polkit", "submit": false}));
     }
@@ -1399,7 +1556,8 @@ mod tests {
                     .unwrap();
             }
             let action = action_rx.recv().await.unwrap();
-            let event = json!({"type": "event", "event": {"data": {"action": action}, "context": {"user_id": "phone"}}});
+            let event = json!({"type": "event", "event": {"event_type": ACTION_EVENT,
+                "data": {"action": action}, "context": {"user_id": "phone"}}});
             ws.send(send(event)).await.unwrap();
             ws.next().await;
         });
@@ -1418,7 +1576,7 @@ mod tests {
         let mut child = cmd.spawn().unwrap();
         let listener = {
             let a = a.clone();
-            spawn_local(async move { a.listen().await })
+            spawn_local(async move { a.listen(&mut 1).await })
         };
         while !a.connected.get() {
             sleep(Duration::from_millis(10)).await;
@@ -1465,14 +1623,17 @@ mod tests {
         ]
         .map(|(p, c)| (p, c.into()))
         .into();
-        let p = a
-            .describe_chain(&chain, 0, &json!({"user": "root", "service": "login"}))
-            .unwrap();
+        let req = AuthReq {
+            stage: Stage::Finish,
+            typed: false,
+            service: Some("login".into()),
+            user: Some("root".into()),
+            rhost: String::new(),
+        };
+        let p = a.describe_chain(&chain, 0, &req, |_| None).unwrap();
         assert_eq!(p.app, 7);
     }
 
-    /// Outputs of the Python enable/disable on the same inputs, including its
-    /// glued line when a file lacks a trailing newline and an auth line.
     #[test]
     fn pam_matches_python() {
         let golden: Value =

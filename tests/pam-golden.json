@@ -33,10 +33,10 @@
   },
   "ven": {},
   "enabled": {
-   "sudo-i": "account include xauth       optional     pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\n"
+   "sudo-i": "account include x\nauth       optional     pam_exec.so quiet seteuid stdout /usr/libexec/ha-remote/pam-helper start\nauth       sufficient   pam_exec.so quiet seteuid expose_authtok /usr/libexec/ha-remote/pam-helper finish\n"
   },
   "disabled": {
-   "sudo-i": ""
+   "sudo-i": "account include x\n"
   }
  }
 }
